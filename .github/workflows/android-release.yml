@@ -36,7 +36,7 @@ jobs:
             exit 1
           fi
           version_name="${base_version}-${GITHUB_RUN_NUMBER}"
-          version_code=$((1000 + GITHUB_RUN_NUMBER))
+          version_code=$((3000 + GITHUB_RUN_NUMBER))
           echo "RELEASE_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=v$version_name" >> "$GITHUB_ENV"

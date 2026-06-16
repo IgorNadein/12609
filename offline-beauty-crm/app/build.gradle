@@ -5,6 +5,13 @@ plugins {
     id "org.jetbrains.kotlin.kapt"
 }
 
+def releaseStoreFile = System.getenv("SIGNING_STORE_FILE")
+def releaseStorePassword = System.getenv("SIGNING_STORE_PASSWORD")
+def releaseKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
+    .every { it != null && !it.isBlank() }
+
 android {
     namespace "com.offlinebeautycrm"
     compileSdk 36
@@ -19,6 +26,27 @@ android {
 
     buildFeatures {
         compose true
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
     }
 
     compileOptions {

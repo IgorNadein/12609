@@ -1,0 +1,32 @@
+# Android / Gradle
+.gradle/
+**/.gradle/
+**/build/
+**/.kotlin/
+local.properties
+*.iml
+.idea/
+
+# Build outputs
+*.apk
+*.ap_
+*.aab
+
+# Local test and research artifacts
+build-logs
+build-logs/
+test-artifacts
+test-artifacts/
+salon-apks
+salon-apks/
+tooling
+tooling/
+logo-concepts
+logo-concepts/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak

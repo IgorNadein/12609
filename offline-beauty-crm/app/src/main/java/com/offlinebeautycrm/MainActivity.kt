@@ -7,6 +7,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ContentProviderOperation
 import android.content.ContentUris
@@ -21,6 +22,7 @@ import android.os.Bundle
 import android.provider.CalendarContract
 import android.provider.ContactsContract
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.telephony.SmsManager
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
@@ -92,6 +94,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
@@ -127,6 +130,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -153,6 +157,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.room.ColumnInfo
 import androidx.room.Dao
@@ -184,7 +189,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalDate
@@ -246,6 +255,7 @@ private const val AUTOMATION_RETENTION_WORK = "automation_retention_scan"
 private const val GOOGLE_MEET_PACKAGE = "com.google.android.apps.tachyon"
 private const val GOOGLE_MEET_PHONE_VIDEO_MIME = "vnd.android.cursor.item/com.google.android.apps.tachyon.phone.meet"
 private const val GOOGLE_MEET_EMAIL_VIDEO_MIME = "vnd.android.cursor.item/com.google.android.apps.tachyon.email.meet"
+private const val GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/IgorNadein/12609/releases/latest"
 
 private val triggerOptions = listOf("За 24 часа до записи", "За 2 часа до записи", "После визита", "Ручная задача")
 private val automationTriggerTypes = listOf(
@@ -295,6 +305,29 @@ private val syncModeOptions = listOf(
     SYNC_MODE_SYSTEM_TO_LOCAL,
     SYNC_MODE_TWO_WAY
 )
+
+private data class AppVersionInfo(
+    val versionName: String,
+    val versionCode: Long
+)
+
+private data class GitHubReleaseInfo(
+    val tagName: String,
+    val versionName: String,
+    val publishedAt: String,
+    val body: String,
+    val htmlUrl: String,
+    val apkName: String,
+    val apkDownloadUrl: String
+)
+
+private sealed class UpdateCheckState {
+    data object Idle : UpdateCheckState()
+    data object Checking : UpdateCheckState()
+    data class Current(val currentVersion: AppVersionInfo, val release: GitHubReleaseInfo) : UpdateCheckState()
+    data class Available(val currentVersion: AppVersionInfo, val release: GitHubReleaseInfo) : UpdateCheckState()
+    data class Error(val currentVersion: AppVersionInfo, val message: String) : UpdateCheckState()
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -2623,6 +2656,142 @@ class AutomationNotificationReceiver : BroadcastReceiver() {
     }
 }
 
+private object GitHubUpdates {
+    fun currentVersion(context: Context): AppVersionInfo {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+        return AppVersionInfo(info.versionName.orEmpty().ifBlank { "0" }, versionCode)
+    }
+
+    suspend fun check(context: Context): UpdateCheckState = withContext(Dispatchers.IO) {
+        val current = currentVersion(context)
+        try {
+            val release = fetchLatestStableRelease()
+            val currentParts = parseVersionParts(current.versionName)
+                ?: return@withContext UpdateCheckState.Error(current, "Не удалось распознать текущую версию ${current.versionName}")
+            val releaseParts = parseVersionParts(release.versionName)
+                ?: return@withContext UpdateCheckState.Error(current, "Не удалось распознать версию релиза ${release.tagName}")
+            if (compareVersionParts(releaseParts, currentParts) > 0) {
+                UpdateCheckState.Available(current, release)
+            } else {
+                UpdateCheckState.Current(current, release)
+            }
+        } catch (e: Exception) {
+            UpdateCheckState.Error(current, e.message ?: "Не удалось проверить обновления")
+        }
+    }
+
+    suspend fun downloadApk(context: Context, release: GitHubReleaseInfo): File = withContext(Dispatchers.IO) {
+        val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
+        updatesDir.listFiles { file -> file.extension.equals("apk", ignoreCase = true) }
+            ?.forEach { file -> runCatching { file.delete() } }
+        val cleanName = release.apkName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "12609-update.apk" }
+        val target = File(updatesDir, cleanName)
+        val connection = (URL(release.apkDownloadUrl).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15000
+            readTimeout = 30000
+            requestMethod = "GET"
+            setRequestProperty("Accept", "application/octet-stream")
+            setRequestProperty("User-Agent", "12609-android-updater")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) error("GitHub вернул HTTP $code при скачивании APK")
+            connection.inputStream.use { input ->
+                FileOutputStream(target).use { output -> input.copyTo(output) }
+            }
+        } finally {
+            connection.disconnect()
+        }
+        if (!target.exists() || target.length() <= 0L) error("APK скачан пустым файлом")
+        target
+    }
+
+    fun installApk(context: Context, apkFile: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            val settingsIntent = Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(settingsIntent)
+            return
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            apkFile
+        )
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(intent)
+    }
+
+    fun openRelease(context: Context, release: GitHubReleaseInfo) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(release.htmlUrl))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    }
+
+    private fun fetchLatestStableRelease(): GitHubReleaseInfo {
+        val json = JSONObject(fetchText(GITHUB_LATEST_RELEASE_URL))
+        if (json.optBoolean("draft") || json.optBoolean("prerelease")) {
+            error("Последний релиз не является стабильным")
+        }
+        val tagName = json.optString("tag_name").trim()
+        if (tagName.isBlank()) error("GitHub Release без тега версии")
+        val assets = json.optJSONArray("assets") ?: JSONArray()
+        var apkName = ""
+        var apkDownloadUrl = ""
+        for (index in 0 until assets.length()) {
+            val asset = assets.getJSONObject(index)
+            val name = asset.optString("name").trim()
+            val downloadUrl = asset.optString("browser_download_url").trim()
+            if (name.endsWith(".apk", ignoreCase = true) && downloadUrl.isNotBlank()) {
+                apkName = name
+                apkDownloadUrl = downloadUrl
+                break
+            }
+        }
+        if (apkDownloadUrl.isBlank()) error("В последнем релизе нет APK-файла")
+        return GitHubReleaseInfo(
+            tagName = tagName,
+            versionName = tagName.removePrefix("v").removePrefix("V"),
+            publishedAt = json.optString("published_at").trim(),
+            body = json.optString("body").trim(),
+            htmlUrl = json.optString("html_url").trim(),
+            apkName = apkName,
+            apkDownloadUrl = apkDownloadUrl
+        )
+    }
+
+    private fun fetchText(url: String): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15000
+            readTimeout = 15000
+            requestMethod = "GET"
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", "12609-android-updater")
+        }
+        return try {
+            val code = connection.responseCode
+            if (code == 404) error("GitHub Releases пока не опубликованы")
+            if (code !in 200..299) error("GitHub вернул HTTP $code")
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
 private object AutomationNotifications {
     suspend fun showConfirmation(context: Context, db: AppDatabase, outboxId: Long): Boolean {
         if (!hasAutomationNotificationPermission(context)) return false
@@ -4252,7 +4421,8 @@ private enum class SettingsSubScreen(val label: String) {
     Services("Услуги"),
     Automation("Автоматизация"),
     Queue("Очередь задач"),
-    Backup("Резервные копии")
+    Backup("Резервные копии"),
+    Updates("Проверка обновлений")
 }
 
 private enum class AppointmentCalendarView(val label: String) {
@@ -9279,6 +9449,147 @@ private fun BackupSettingsSection(viewModel: AppViewModel) {
 }
 
 @Composable
+private fun UpdatesSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var state by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Idle) }
+    var downloadedApk by remember { mutableStateOf<File?>(null) }
+    var isDownloading by rememberSaveable { mutableStateOf(false) }
+    var downloadMessage by rememberSaveable { mutableStateOf("") }
+    val currentVersion = remember { GitHubUpdates.currentVersion(context) }
+
+    fun checkUpdates() {
+        state = UpdateCheckState.Checking
+        downloadedApk = null
+        downloadMessage = ""
+        scope.launch {
+            state = GitHubUpdates.check(context.applicationContext)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        state = UpdateCheckState.Checking
+        state = GitHubUpdates.check(context.applicationContext)
+    }
+
+    SectionTitle("Проверка обновлений")
+    Text(
+        "Приложение проверяет стабильные GitHub Releases репозитория IgorNadein/12609. Если в релизе есть APK, его можно скачать и установить через системный установщик Android.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    InfoCard {
+        Text("Установленная версия", fontWeight = FontWeight.Bold)
+        Text("${currentVersion.versionName} · code ${currentVersion.versionCode}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+
+    when (val currentState = state) {
+        UpdateCheckState.Idle,
+        UpdateCheckState.Checking -> InfoCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                Column {
+                    Text("Проверяю обновления", fontWeight = FontWeight.Bold)
+                    Text("Нужен интернет", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        is UpdateCheckState.Current -> InfoCard {
+            Text("Установлена последняя версия", fontWeight = FontWeight.Bold)
+            Text(
+                "Последний релиз: ${currentState.release.tagName}${formatGitHubPublishedAt(currentState.release.publishedAt).let { if (it.isBlank()) "" else " · $it" }}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { checkUpdates() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Проверить снова")
+            }
+        }
+
+        is UpdateCheckState.Available -> InfoCard {
+            Text("Доступно обновление ${currentState.release.tagName}", fontWeight = FontWeight.Bold)
+            Text(
+                "Сейчас установлена ${currentState.currentVersion.versionName}. APK: ${currentState.release.apkName}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            val publishedAt = formatGitHubPublishedAt(currentState.release.publishedAt)
+            if (publishedAt.isNotBlank()) {
+                Text("Опубликовано: $publishedAt", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (currentState.release.body.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    currentState.release.body,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (downloadMessage.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(downloadMessage, color = MaterialTheme.colorScheme.primary)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    scope.launch {
+                        isDownloading = true
+                        downloadMessage = ""
+                        try {
+                            val apk = downloadedApk ?: GitHubUpdates.downloadApk(context.applicationContext, currentState.release)
+                            downloadedApk = apk
+                            GitHubUpdates.installApk(context.applicationContext, apk)
+                            downloadMessage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                                !context.packageManager.canRequestPackageInstalls()
+                            ) {
+                                "Разреши установку из этого источника, затем вернись и нажми кнопку еще раз."
+                            } else {
+                                "Открыт системный установщик Android."
+                            }
+                        } catch (e: ActivityNotFoundException) {
+                            downloadMessage = "Не удалось открыть системный установщик APK"
+                        } catch (e: Exception) {
+                            downloadMessage = "Не удалось скачать обновление: ${e.message ?: "ошибка"}"
+                        } finally {
+                            isDownloading = false
+                        }
+                    }
+                },
+                enabled = !isDownloading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (isDownloading) "Скачиваю..." else "Скачать и установить")
+            }
+            OutlinedButton(
+                onClick = {
+                    runCatching { GitHubUpdates.openRelease(context.applicationContext, currentState.release) }
+                        .onFailure { downloadMessage = "Не удалось открыть страницу релиза" }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Открыть релиз")
+            }
+            OutlinedButton(onClick = { checkUpdates() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Проверить снова")
+            }
+        }
+
+        is UpdateCheckState.Error -> InfoCard {
+            Text("Не удалось проверить обновления", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
+            Text(currentState.message, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { checkUpdates() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Проверить снова")
+            }
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ServicesSettingsSection(viewModel: AppViewModel, services: List<ServiceEntity>) {
     var editingService by remember { mutableStateOf<ServiceEntity?>(null) }
@@ -9604,6 +9915,9 @@ private fun SettingsScreen(
         SettingsSubScreen.Backup -> ScrollPage {
             BackupSettingsSection(viewModel)
         }
+        SettingsSubScreen.Updates -> ScrollPage {
+            UpdatesSettingsSection()
+        }
     }
 }
 
@@ -9617,6 +9931,7 @@ private fun SettingsMenuScreen(
 ) {
     val contactsMode = syncModeLabel(SYNC_RESOURCE_CONTACTS, syncSettingFor(syncSettings, SYNC_RESOURCE_CONTACTS).mode)
     val calendarMode = syncModeLabel(SYNC_RESOURCE_CALENDAR, syncSettingFor(syncSettings, SYNC_RESOURCE_CALENDAR).mode)
+    val currentVersion = GitHubUpdates.currentVersion(LocalContext.current)
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
@@ -9676,6 +9991,14 @@ private fun SettingsMenuScreen(
                 subtitle = "Экспорт и импорт локальной базы JSON",
                 icon = Icons.Filled.Settings,
                 onClick = { onOpen(SettingsSubScreen.Backup) }
+            )
+        }
+        item {
+            SettingsMenuItem(
+                title = "Проверка обновлений",
+                subtitle = "Установлена версия ${currentVersion.versionName}",
+                icon = Icons.Filled.Sync,
+                onClick = { onOpen(SettingsSubScreen.Updates) }
             )
         }
     }
@@ -10255,6 +10578,33 @@ private fun AppointmentRow.matchesAppointmentSearch(query: String): Boolean {
         clientName.lowercase(Locale.getDefault()).contains(needle) ||
         notes.lowercase(Locale.getDefault()).contains(needle) ||
         status.lowercase(Locale.getDefault()).contains(needle)
+}
+
+private fun parseVersionParts(value: String): List<Int>? {
+    val clean = value.trim().removePrefix("v").removePrefix("V")
+    if (clean.isBlank()) return null
+    val parts = clean.split(".", "-", "_")
+        .mapNotNull { part -> part.takeWhile { it.isDigit() }.takeIf { it.isNotBlank() }?.toIntOrNull() }
+    return parts.takeIf { it.isNotEmpty() }
+}
+
+private fun compareVersionParts(left: List<Int>, right: List<Int>): Int {
+    val size = maxOf(left.size, right.size)
+    for (index in 0 until size) {
+        val leftPart = left.getOrElse(index) { 0 }
+        val rightPart = right.getOrElse(index) { 0 }
+        if (leftPart != rightPart) return leftPart.compareTo(rightPart)
+    }
+    return 0
+}
+
+private fun formatGitHubPublishedAt(value: String): String {
+    if (value.isBlank()) return ""
+    return runCatching {
+        Instant.parse(value)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("d MMMM yyyy, HH:mm", ruLocale))
+    }.getOrDefault(value)
 }
 
 private fun now(): String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())

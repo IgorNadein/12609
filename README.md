@@ -44,14 +44,13 @@ gradle :app:assembleDebug
 - `KEY_ALIAS` - alias ключа.
 - `KEY_PASSWORD` - пароль ключа.
 
-Перед релизом увеличьте `versionCode` и `versionName` в `offline-beauty-crm/app/build.gradle`, затем создайте и отправьте тег:
+После настройки secrets каждый push в ветку `master` автоматически собирает APK и публикует стабильный GitHub Release. Workflow сам добавляет к базовой версии номер запуска, например `0.3.0-12`, и повышает `versionCode`, чтобы Android видел сборку как обновление.
 
 ```bash
-git tag v0.3.1
-git push origin v0.3.1
+git push origin master
 ```
 
-GitHub Actions соберет подписанный APK и прикрепит его к GitHub Release. Тег должен быть выше установленной версии, иначе приложение покажет, что обновлений нет.
+GitHub Actions соберет подписанный APK, создаст release с тегом вида `v0.3.0-12` и прикрепит APK. Экран `Проверка обновлений` увидит этот release как доступное обновление.
 
 ## Локальные артефакты
 

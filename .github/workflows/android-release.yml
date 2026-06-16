@@ -2,8 +2,8 @@ name: Android Release APK
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
+
+      - name: Compute master release version
+        run: |
+          base_version="$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' offline-beauty-crm/app/build.gradle | head -n 1)"
+          if [ -z "$base_version" ]; then
+            echo "::error::Could not read base versionName"
+            exit 1
+          fi
+          version_name="${base_version}-${GITHUB_RUN_NUMBER}"
+          version_code=$((1000 + GITHUB_RUN_NUMBER))
+          echo "RELEASE_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v$version_name" >> "$GITHUB_ENV"
 
       - name: Verify signing secrets
         env:
@@ -57,16 +70,28 @@ jobs:
           SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_NAME: ${{ env.RELEASE_VERSION_NAME }}
+          VERSION_CODE: ${{ env.RELEASE_VERSION_CODE }}
         run: gradle :app:assembleRelease
 
       - name: Prepare APK asset
         run: |
           mkdir -p release-assets
-          cp offline-beauty-crm/app/build/outputs/apk/release/app-release.apk "release-assets/12609-${GITHUB_REF_NAME}.apk"
+          cp offline-beauty-crm/app/build/outputs/apk/release/app-release.apk "release-assets/12609-${RELEASE_TAG}.apk"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: 12609 ${{ env.RELEASE_VERSION_NAME }}
+          target_commitish: master
+          body: |
+            Автоматическая сборка из ветки master.
+
+            Commit: ${{ github.sha }}
+            Version: ${{ env.RELEASE_VERSION_NAME }}
+            Version code: ${{ env.RELEASE_VERSION_CODE }}
           files: release-assets/*.apk
           draft: false
           prerelease: false
+          make_latest: true

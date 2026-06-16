@@ -5,10 +5,19 @@ plugins {
     id "org.jetbrains.kotlin.kapt"
 }
 
-def releaseStoreFile = System.getenv("SIGNING_STORE_FILE")
-def releaseStorePassword = System.getenv("SIGNING_STORE_PASSWORD")
-def releaseKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
-def releaseKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+def repositoryUpdateKeystore = file("release/12609-update.keystore")
+def releaseStoreFile = System.getenv("SIGNING_STORE_FILE") ?: (
+    repositoryUpdateKeystore.exists() ? repositoryUpdateKeystore.absolutePath : null
+)
+def releaseStorePassword = System.getenv("SIGNING_STORE_PASSWORD") ?: (
+    repositoryUpdateKeystore.exists() ? "12609update" : null
+)
+def releaseKeyAlias = System.getenv("SIGNING_KEY_ALIAS") ?: (
+    repositoryUpdateKeystore.exists() ? "12609-update" : null
+)
+def releaseKeyPassword = System.getenv("SIGNING_KEY_PASSWORD") ?: (
+    repositoryUpdateKeystore.exists() ? "12609update" : null
+)
 def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
     .every { it != null && !it.isBlank() }
 def envVersionCode = System.getenv("VERSION_CODE")

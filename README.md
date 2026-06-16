@@ -37,20 +37,15 @@ gradle :app:assembleDebug
 
 Приложение проверяет обновления через GitHub Releases. Для публикации APK на GitHub используется workflow `.github/workflows/android-release.yml`.
 
-Один раз добавьте в `Settings -> Secrets and variables -> Actions` такие repository secrets:
-
-- `KEYSTORE_BASE64` - release keystore, закодированный в base64.
-- `KEYSTORE_PASSWORD` - пароль keystore.
-- `KEY_ALIAS` - alias ключа.
-- `KEY_PASSWORD` - пароль ключа.
-
-После настройки secrets каждый push в ветку `master` автоматически собирает APK и публикует стабильный GitHub Release. Workflow сам добавляет к базовой версии номер запуска, например `0.3.0-12`, и повышает `versionCode`, чтобы Android видел сборку как обновление.
+Каждый push в ветку `master` автоматически собирает подписанный APK и публикует стабильный GitHub Release. Workflow сам добавляет к базовой версии номер запуска, например `0.3.0-12`, и повышает `versionCode`, чтобы Android видел сборку как обновление.
 
 ```bash
 git push origin master
 ```
 
 GitHub Actions соберет подписанный APK, создаст release с тегом вида `v0.3.0-12` и прикрепит APK. Экран `Проверка обновлений` увидит этот release как доступное обновление.
+
+Для простоты update-keystore лежит в репозитории: `offline-beauty-crm/app/release/12609-update.keystore`. Этот ключ нельзя менять после публикации первых APK, иначе Android не сможет поставить обновление поверх уже установленной версии. Если на телефоне сейчас стоит debug APK, первый release APK может потребовать удалить debug-версию и установить release заново.
 
 ## Локальные артефакты
 

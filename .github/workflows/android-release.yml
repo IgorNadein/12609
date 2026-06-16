@@ -30,7 +30,7 @@ jobs:
 
       - name: Compute master release version
         run: |
-          base_version="$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' offline-beauty-crm/app/build.gradle | head -n 1)"
+          base_version="$(grep -E 'versionName' offline-beauty-crm/app/build.gradle | grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+"' | head -n 1 | tr -d '"')"
           if [ -z "$base_version" ]; then
             echo "::error::Could not read base versionName"
             exit 1

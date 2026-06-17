@@ -6229,7 +6229,10 @@ private fun AppointmentsScreen(
                         appointments = visibleAppointments,
                         hasCalendarPermissions = hasCalendarPermissions,
                         onAppointmentClick = { openAppointmentDetails(it) },
-                        onDayClick = { openNewAppointmentAt(it) }
+                        onDayClick = {
+                            selectedDate = it
+                            calendarView = AppointmentCalendarView.Day
+                        }
                     )
                 }
             }

@@ -5952,7 +5952,7 @@ private fun AppointmentsScreen(
         context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
     }
 
-    var calendarView by remember { mutableStateOf(AppointmentCalendarView.Day) }
+    var calendarView by rememberSaveable { mutableStateOf(AppointmentCalendarView.Month) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     var searchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -6051,7 +6051,6 @@ private fun AppointmentsScreen(
             )
         }
         selectedDate = appointmentDate
-        calendarView = AppointmentCalendarView.Day
         showCreateSheet = false
         onEditorOpenChange(false)
         resetDraft()
@@ -6099,6 +6098,17 @@ private fun AppointmentsScreen(
                 serviceDraftKey = (drafts.maxOfOrNull { it.localId } ?: -1) + 1
             }
         }
+        showCreateSheet = true
+        onEditorOpenChange(true)
+    }
+
+    fun openNewAppointmentAt(date: LocalDate, time: LocalTime = LocalTime.of(10, 0)) {
+        resetDraft()
+        selectedAppointmentId = null
+        selectedClientProfileId = null
+        selectedDate = date
+        appointmentDate = date
+        appointmentTime = "%02d:%02d".format(Locale.US, time.hour, time.minute)
         showCreateSheet = true
         onEditorOpenChange(true)
     }
@@ -6185,7 +6195,6 @@ private fun AppointmentsScreen(
                 onSearchQueryChange = { searchQuery = it },
                 onToday = {
                     selectedDate = LocalDate.now()
-                    calendarView = AppointmentCalendarView.Day
                 },
                 onPreviousPeriod = {
                     selectedDate = selectedDate.shiftCalendarPeriod(calendarView, -1)
@@ -6212,17 +6221,15 @@ private fun AppointmentsScreen(
                         selectedDate = selectedDate,
                         appointments = visibleAppointments,
                         hasCalendarPermissions = hasCalendarPermissions,
-                        onAppointmentClick = { openAppointmentDetails(it) }
+                        onAppointmentClick = { openAppointmentDetails(it) },
+                        onEmptySlotClick = { date, time -> openNewAppointmentAt(date, time) }
                     )
                     AppointmentCalendarView.Month -> AppointmentMonthView(
                         selectedDate = selectedDate,
                         appointments = visibleAppointments,
                         hasCalendarPermissions = hasCalendarPermissions,
                         onAppointmentClick = { openAppointmentDetails(it) },
-                        onDayClick = {
-                            selectedDate = it
-                            calendarView = AppointmentCalendarView.Day
-                        }
+                        onDayClick = { openNewAppointmentAt(it) }
                     )
                 }
             }
@@ -6282,12 +6289,7 @@ private fun AppointmentsScreen(
 
         if (clients.isNotEmpty() && selectedAppointment == null && !showCreateSheet) {
             FloatingActionButton(
-                onClick = {
-                    resetDraft()
-                    appointmentDate = selectedDate
-                    showCreateSheet = true
-                    onEditorOpenChange(true)
-                },
+                onClick = { openNewAppointmentAt(selectedDate) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(20.dp)
@@ -6627,7 +6629,8 @@ private fun AppointmentTimelineView(
     selectedDate: LocalDate,
     appointments: List<AppointmentRow>,
     hasCalendarPermissions: Boolean,
-    onAppointmentClick: (AppointmentRow) -> Unit
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onEmptySlotClick: (LocalDate, LocalTime) -> Unit
 ) {
     val dates = visibleTimelineDates(calendarView, selectedDate)
     val hourHeight = 82.dp
@@ -6684,7 +6687,7 @@ private fun AppointmentTimelineView(
                                     .width(48.dp)
                                     .padding(top = 6.dp)
                             )
-                            dates.forEach {
+                            dates.forEach { date ->
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
@@ -6694,6 +6697,9 @@ private fun AppointmentTimelineView(
                                             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.18f),
                                             RoundedCornerShape(6.dp)
                                         )
+                                        .clickable {
+                                            onEmptySlotClick(date, LocalTime.of(hour, 0))
+                                        }
                                 )
                             }
                         }

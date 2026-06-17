@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - master
+    paths:
+      - "offline-beauty-crm/**"
+      - ".github/workflows/android-release.yml"
   workflow_dispatch:
 
 permissions:

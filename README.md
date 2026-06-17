@@ -1,8 +1,8 @@
 **Language:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
 
-# 12609 - Offline Beauty CRM
+# 12609 - Offline Service CRM
 
-12609 is a native Android CRM for beauty salon masters. The application is built for offline-first local work: clients, appointments, services, finance records, system contact/calendar synchronization, SMS task automation, JSON backup/import, and APK update checks.
+12609 is a native Android CRM for independent service professionals and appointment-based small businesses. The application is built for offline-first local work: clients, appointments, services, finance records, system contact/calendar synchronization, SMS task automation, JSON backup/import, and APK update checks.
 
 The project demonstrates Android product development with Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, system integrations, local-first data storage, and GitHub Actions CI.
 
@@ -32,7 +32,6 @@ The project demonstrates Android product development with Kotlin, Jetpack Compos
 offline-beauty-crm/   Android application module
 build-logs/           Local build logs, ignored by Git
 test-artifacts/       Local test artifacts, ignored by Git
-salon-apks/           Local APK outputs, ignored by Git
 ```
 
 ## Local Build

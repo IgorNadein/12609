@@ -10053,7 +10053,7 @@ private fun BookingBotsSettingsSection() {
     InfoCard {
         Text("Telegram-бот записи", fontWeight = FontWeight.Bold)
         Text(
-            "План: бот показывает услуги, свободные окна и создает заявку на запись. Мастер подтверждает ее в CRM.",
+            "План: бот показывает услуги, свободные окна и создает заявку на запись. Специалист подтверждает ее в CRM.",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(8.dp))

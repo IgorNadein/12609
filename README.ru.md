@@ -1,8 +1,8 @@
 **Язык:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
 
-# 12609 - Offline Beauty CRM
+# 12609 - Offline Service CRM
 
-12609 - нативное Android-приложение CRM для мастера салона красоты. Приложение рассчитано на offline-first работу: клиенты, записи, услуги, финансы, синхронизация с системными контактами и календарем, SMS-oriented автоматизация задач, JSON backup/import и проверка обновлений APK.
+12609 - нативное Android-приложение CRM для независимых сервисных специалистов и малого бизнеса, работающего по записи. Приложение рассчитано на offline-first работу: клиенты, записи, услуги, финансы, синхронизация с системными контактами и календарем, SMS-oriented автоматизация задач, JSON backup/import и проверка обновлений APK.
 
 Проект демонстрирует Android product development: Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, системные Android-интеграции, local-first хранение данных и GitHub Actions CI.
 
@@ -32,7 +32,6 @@
 offline-beauty-crm/   Android application module
 build-logs/           Local build logs, ignored by Git
 test-artifacts/       Local test artifacts, ignored by Git
-salon-apks/           Local APK outputs, ignored by Git
 ```
 
 ## Локальная сборка

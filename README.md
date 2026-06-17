@@ -24,7 +24,7 @@ The project demonstrates Android product development with Kotlin, Jetpack Compos
 - Database: Room over SQLite.
 - Background work: WorkManager.
 - Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions debug APK build.
+- CI: GitHub Actions signed release APK build.
 
 ## Project Structure
 
@@ -46,27 +46,31 @@ gradle :app:assembleDebug
 
 The repository does not include a Gradle wrapper yet, so the local build depends on an installed Gradle distribution or Android Studio.
 
-## CI
+## Release CI
 
-GitHub Actions runs a safe debug build:
+GitHub Actions can build and publish a signed release APK from `master`:
 
 ```bash
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
-The generated debug APK is uploaded as a workflow artifact. Release signing keys are not stored in the repository.
+The workflow restores the signing keystore from GitHub Actions Secrets, builds a signed release APK, creates a GitHub Release, and uploads the APK asset. The app can use the latest GitHub Release for its update-checking flow.
 
 ## Release Signing
 
-Release signing is configured through environment variables only:
+Release signing is configured through environment variables and GitHub Actions Secrets only:
 
 - `SIGNING_STORE_FILE`
 - `SIGNING_STORE_PASSWORD`
 - `SIGNING_KEY_ALIAS`
 - `SIGNING_KEY_PASSWORD`
+- `KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
 
 Signing keys, keystores, local APKs, generated build folders, test artifacts, and local logs are excluded from Git.
 
 ## Security Notes
 
-This public version is prepared as a portfolio snapshot. Historical public release APKs and old release tags were removed before publication cleanup. Any signing key that was previously committed must be considered compromised and should not be reused for real production distribution.
+This public version is prepared as a portfolio snapshot. The update key is stored in GitHub Actions Secrets only, so test devices signed with the previous APK key can still receive updates through GitHub Releases. Because this key was previously committed, it must still be treated as compromised and should not be reused for real production distribution.

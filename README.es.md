@@ -24,7 +24,7 @@ El proyecto demuestra desarrollo de producto Android con Kotlin, Jetpack Compose
 - Database: Room sobre SQLite.
 - Background work: WorkManager.
 - Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions debug APK build.
+- CI: GitHub Actions signed release APK build.
 
 ## Estructura del proyecto
 
@@ -46,27 +46,31 @@ gradle :app:assembleDebug
 
 El repositorio todavia no incluye Gradle wrapper, por lo que el build local depende de una distribucion Gradle instalada o Android Studio.
 
-## CI
+## Release CI
 
-GitHub Actions ejecuta un debug build seguro:
+GitHub Actions puede construir y publicar un signed release APK desde `master`:
 
 ```bash
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
-El debug APK generado se sube como workflow artifact. Release signing keys no se guardan en el repositorio.
+El workflow restaura el signing keystore desde GitHub Actions Secrets, construye un signed release APK, crea un GitHub Release y sube el APK asset. La aplicacion puede usar el ultimo GitHub Release para su flujo de comprobacion de actualizaciones.
 
 ## Release Signing
 
-Release signing se configura solo mediante environment variables:
+Release signing se configura solo mediante environment variables y GitHub Actions Secrets:
 
 - `SIGNING_STORE_FILE`
 - `SIGNING_STORE_PASSWORD`
 - `SIGNING_KEY_ALIAS`
 - `SIGNING_KEY_PASSWORD`
+- `KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
 
 Signing keys, keystores, APK locales, generated build folders, test artifacts y local logs estan excluidos de Git.
 
 ## Security Notes
 
-Esta version publica esta preparada como portfolio snapshot. Los antiguos public release APKs y release tags fueron eliminados antes de la limpieza. Cualquier signing key que haya estado antes en Git debe considerarse comprometido y no debe reutilizarse para una distribucion real de produccion.
+Esta version publica esta preparada como portfolio snapshot. El update key se almacena solo en GitHub Actions Secrets, por lo que los dispositivos de prueba firmados con la clave APK anterior pueden seguir recibiendo actualizaciones mediante GitHub Releases. Como esta clave estuvo antes en Git, debe seguir considerandose comprometida y no debe reutilizarse para una distribucion real de produccion.

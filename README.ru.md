@@ -24,7 +24,7 @@
 - Database: Room поверх SQLite.
 - Background work: WorkManager.
 - Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions debug APK build.
+- CI: GitHub Actions signed release APK build.
 
 ## Структура проекта
 
@@ -46,27 +46,31 @@ gradle :app:assembleDebug
 
 Gradle wrapper пока не добавлен, поэтому локальная сборка зависит от установленного Gradle или Android Studio.
 
-## CI
+## Release CI
 
-GitHub Actions выполняет безопасную debug-сборку:
+GitHub Actions может собирать и публиковать signed release APK из `master`:
 
 ```bash
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
-Собранный debug APK загружается как workflow artifact. Release signing keys не хранятся в репозитории.
+Workflow восстанавливает signing keystore из GitHub Actions Secrets, собирает signed release APK, создает GitHub Release и загружает APK asset. Приложение может использовать latest GitHub Release для update-checking flow.
 
 ## Release Signing
 
-Release signing настраивается только через environment variables:
+Release signing настраивается только через environment variables и GitHub Actions Secrets:
 
 - `SIGNING_STORE_FILE`
 - `SIGNING_STORE_PASSWORD`
 - `SIGNING_KEY_ALIAS`
 - `SIGNING_KEY_PASSWORD`
+- `KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
 
 Signing keys, keystores, локальные APK, generated build folders, test artifacts и local logs исключены из Git.
 
 ## Security Notes
 
-Публичная версия подготовлена как portfolio snapshot. Старые публичные release APK и release tags удалены перед чисткой публикации. Любой signing key, который ранее попадал в Git, нужно считать скомпрометированным и не использовать для реального production distribution.
+Публичная версия подготовлена как portfolio snapshot. Update key хранится только в GitHub Actions Secrets, поэтому тестовые устройства со старой подписью APK смогут получать обновления через GitHub Releases. Так как этот ключ раньше попадал в Git, его все равно нужно считать скомпрометированным и не использовать для реального production distribution.

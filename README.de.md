@@ -24,7 +24,7 @@ Das Projekt zeigt Android-Produktentwicklung mit Kotlin, Jetpack Compose, Materi
 - Database: Room ueber SQLite.
 - Background work: WorkManager.
 - Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions debug APK build.
+- CI: GitHub Actions signed release APK build.
 
 ## Projektstruktur
 
@@ -46,27 +46,31 @@ gradle :app:assembleDebug
 
 Ein Gradle Wrapper ist noch nicht enthalten, daher haengt der lokale Build von einer installierten Gradle-Distribution oder Android Studio ab.
 
-## CI
+## Release CI
 
-GitHub Actions fuehrt einen sicheren Debug-Build aus:
+GitHub Actions kann aus `master` ein signed release APK bauen und veroeffentlichen:
 
 ```bash
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
-Das erzeugte debug APK wird als workflow artifact hochgeladen. Release signing keys werden nicht im Repository gespeichert.
+Der Workflow stellt den signing keystore aus GitHub Actions Secrets wieder her, baut ein signed release APK, erstellt ein GitHub Release und laedt das APK asset hoch. Die App kann das neueste GitHub Release fuer ihren Update-Check verwenden.
 
 ## Release Signing
 
-Release signing wird nur ueber Environment Variables konfiguriert:
+Release signing wird nur ueber Environment Variables und GitHub Actions Secrets konfiguriert:
 
 - `SIGNING_STORE_FILE`
 - `SIGNING_STORE_PASSWORD`
 - `SIGNING_KEY_ALIAS`
 - `SIGNING_KEY_PASSWORD`
+- `KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
 
 Signing keys, keystores, lokale APKs, generated build folders, test artifacts und local logs sind aus Git ausgeschlossen.
 
 ## Security Notes
 
-Diese oeffentliche Version ist als Portfolio-Snapshot vorbereitet. Alte public release APKs und release tags wurden vor der Bereinigung entfernt. Jeder signing key, der frueher in Git enthalten war, muss als kompromittiert gelten und darf nicht fuer echte Production Distribution wiederverwendet werden.
+Diese oeffentliche Version ist als Portfolio-Snapshot vorbereitet. Der update key wird nur in GitHub Actions Secrets gespeichert, sodass Testgeraete mit der alten APK-Signatur weiterhin Updates ueber GitHub Releases erhalten koennen. Da dieser key frueher in Git enthalten war, muss er trotzdem als kompromittiert gelten und darf nicht fuer echte Production Distribution wiederverwendet werden.

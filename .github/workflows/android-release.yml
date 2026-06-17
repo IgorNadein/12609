@@ -1,16 +1,19 @@
-name: Android Release APK
+name: Android CI
 
 on:
   push:
     branches:
       - master
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
+  build-debug:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,44 +31,12 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
-      - name: Compute master release version
-        run: |
-          base_version="$(grep -E 'versionName' offline-beauty-crm/app/build.gradle | grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+"' | head -n 1 | tr -d '"')"
-          if [ -z "$base_version" ]; then
-            echo "::error::Could not read base versionName"
-            exit 1
-          fi
-          version_name="${base_version}-${GITHUB_RUN_NUMBER}"
-          version_code=$((3000 + GITHUB_RUN_NUMBER))
-          echo "RELEASE_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
-          echo "RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=v$version_name" >> "$GITHUB_ENV"
-
-      - name: Build signed release APK
+      - name: Build debug APK
         working-directory: offline-beauty-crm
-        env:
-          VERSION_NAME: ${{ env.RELEASE_VERSION_NAME }}
-          VERSION_CODE: ${{ env.RELEASE_VERSION_CODE }}
-        run: gradle :app:assembleRelease
+        run: gradle :app:assembleDebug
 
-      - name: Prepare APK asset
-        run: |
-          mkdir -p release-assets
-          cp offline-beauty-crm/app/build/outputs/apk/release/app-release.apk "release-assets/12609-${RELEASE_TAG}.apk"
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: 12609 ${{ env.RELEASE_VERSION_NAME }}
-          target_commitish: master
-          body: |
-            Автоматическая сборка из ветки master.
-
-            Commit: ${{ github.sha }}
-            Version: ${{ env.RELEASE_VERSION_NAME }}
-            Version code: ${{ env.RELEASE_VERSION_CODE }}
-          files: release-assets/*.apk
-          draft: false
-          prerelease: false
-          make_latest: true
+          name: 12609-debug-apk
+          path: offline-beauty-crm/app/build/outputs/apk/debug/*.apk

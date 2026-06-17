@@ -1,52 +1,72 @@
-# 12609
+**Language:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
 
-Нативное Android-приложение для локальной CRM мастера салона красоты.
+# 12609 - Offline Beauty CRM
 
-## Проект
+12609 is a native Android CRM for beauty salon masters. The application is built for offline-first local work: clients, appointments, services, finance records, system contact/calendar synchronization, SMS task automation, JSON backup/import, and APK update checks.
 
-- Android-модуль: `offline-beauty-crm`
-- Package ID: `com.offlinebeautycrm`
-- UI: Kotlin + Jetpack Compose + Material 3
-- Локальная база: Room / SQLite
-- Название приложения: `12609`
-- Исходный SVG логотипа: `340851.svg`
+The project demonstrates Android product development with Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, system integrations, local-first data storage, and GitHub Actions CI.
 
-## Возможности
+## Features
 
-- Клиентская база с привязкой к системным контактам.
-- Записи в календарном виде: день, 3 дня, неделя, месяц.
-- Синхронизация с системными контактами и календарем через выбранные режимы.
-- Каталог услуг с ценой и длительностью.
-- Локальные финансы: оплаты, долги, доходы и расходы.
-- Автоматизация через очередь задач и SMS.
-- JSON backup/import локальных данных.
-- Проверка обновлений через стабильные GitHub Releases с установкой APK через системный установщик Android.
+- Client database with optional links to Android system contacts.
+- Appointment calendar with day, 3-day, week, and month views.
+- Synchronization modes for Android contacts and calendar events.
+- Service catalog with prices and duration.
+- Local finance tracking: payments, debts, income, and expenses.
+- Automation task queue and SMS-oriented workflows.
+- JSON backup and import for local data.
+- Update-checking flow based on GitHub Releases, configurable for signed APK distribution.
 
-## Сборка
+## Tech Stack
 
-Требуется Android SDK и Gradle, совместимый с Android Gradle Plugin `8.11.1`.
+- Language: Kotlin.
+- UI: Jetpack Compose and Material 3.
+- Database: Room over SQLite.
+- Background work: WorkManager.
+- Android integrations: contacts, calendar, SMS, system APK installer.
+- CI: GitHub Actions debug APK build.
+
+## Project Structure
+
+```text
+offline-beauty-crm/   Android application module
+build-logs/           Local build logs, ignored by Git
+test-artifacts/       Local test artifacts, ignored by Git
+salon-apks/           Local APK outputs, ignored by Git
+```
+
+## Local Build
+
+The project requires Android SDK and Gradle compatible with Android Gradle Plugin `8.11.1`.
 
 ```bash
 cd offline-beauty-crm
 gradle :app:assembleDebug
 ```
 
-В этом репозитории Gradle wrapper пока не добавлен, поэтому сборка зависит от установленного локально `gradle` или Android Studio.
+The repository does not include a Gradle wrapper yet, so the local build depends on an installed Gradle distribution or Android Studio.
 
-## Релизы и обновления
+## CI
 
-Приложение проверяет обновления через GitHub Releases. Для публикации APK на GitHub используется workflow `.github/workflows/android-release.yml`.
-
-Каждый push в ветку `master` автоматически собирает подписанный APK и публикует стабильный GitHub Release. Workflow сам добавляет к базовой версии номер запуска, например `0.3.0-12`, и повышает `versionCode`, чтобы Android видел сборку как обновление.
+GitHub Actions runs a safe debug build:
 
 ```bash
-git push origin master
+gradle :app:assembleDebug
 ```
 
-GitHub Actions соберет подписанный APK, создаст release с тегом вида `v0.3.0-12` и прикрепит APK. Экран `Проверка обновлений` увидит этот release как доступное обновление.
+The generated debug APK is uploaded as a workflow artifact. Release signing keys are not stored in the repository.
 
-Для простоты update-keystore лежит в репозитории: `offline-beauty-crm/app/release/12609-update.keystore`. Он совпадает с текущим локальным debug-ключом разработки, поэтому GitHub release APK может ставиться поверх уже установленной тестовой версии на телефоне. Этот ключ нельзя менять после публикации первых APK, иначе Android не сможет поставить обновление поверх уже установленной версии.
+## Release Signing
 
-## Локальные артефакты
+Release signing is configured through environment variables only:
 
-Папки `test-artifacts`, `build-logs`, `salon-apks`, `tooling`, а также Gradle build-кеши не коммитятся. Они используются только для локального тестирования, скриншотов и временных APK.
+- `SIGNING_STORE_FILE`
+- `SIGNING_STORE_PASSWORD`
+- `SIGNING_KEY_ALIAS`
+- `SIGNING_KEY_PASSWORD`
+
+Signing keys, keystores, local APKs, generated build folders, test artifacts, and local logs are excluded from Git.
+
+## Security Notes
+
+This public version is prepared as a portfolio snapshot. Historical public release APKs and old release tags were removed before publication cleanup. Any signing key that was previously committed must be considered compromised and should not be reused for real production distribution.

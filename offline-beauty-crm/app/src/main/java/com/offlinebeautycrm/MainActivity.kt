@@ -66,6 +66,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -109,6 +110,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -130,6 +132,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberTimePickerState
@@ -174,8 +177,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -340,10 +346,13 @@ private val fileStampFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern(
 private val dayOfWeekFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", ruLocale)
 private val monthTitleFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("LLLL yyyy", ruLocale)
 private val dayMonthFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMMM", ruLocale)
+private val dayMonthTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM HH:mm", ruLocale)
+private val dayMonthYearFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMMM yyyy", ruLocale)
 private val appointmentDurationOptions = listOf(15, 30, 45, 60, 75, 90, 120, 150, 180, 240, 300, 360)
 private val paymentMethodOptions = listOf("Наличные", "Карта", "Перевод", "Другое")
 private val financeTypeOptions = listOf(FINANCE_TYPE_INCOME, FINANCE_TYPE_EXPENSE)
 private val financeFilterOptions = listOf("Все", "Доходы", "Расходы", "Долги")
+private val financePeriodModes = listOf(FinancePeriodMode.Week, FinancePeriodMode.Month, FinancePeriodMode.Year)
 private val syncModeOptions = listOf(
     SYNC_MODE_OFF,
     SYNC_MODE_MANUAL,
@@ -429,6 +438,19 @@ data class AppointmentEntity(
     val paymentMethod: String = "",
     val paidAt: String = "",
     val status: String = APPOINTMENT_STATUS_PLANNED,
+    val notes: String = "",
+    val calendarEventId: Long = 0,
+    val calendarSyncedAt: String = "",
+    val createdAt: String = now(),
+    val updatedAt: String = now()
+)
+
+@Entity(tableName = "day_offs")
+data class DayOffEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String = "Выходной",
+    val startAt: String,
+    val endAt: String,
     val notes: String = "",
     val calendarEventId: Long = 0,
     val calendarSyncedAt: String = "",
@@ -726,6 +748,11 @@ data class CalendarSyncResult(
     val action: String
 )
 
+data class DayOffCalendarSyncResult(
+    val dayOff: DayOffEntity,
+    val action: String
+)
+
 data class AppointmentServiceDraft(
     val localId: Int,
     val serviceId: Long = 0,
@@ -865,6 +892,63 @@ private fun ClientDraft.toEntity(): ClientEntity {
 }
 
 object ContactsSync {
+    private data class ContactDataSlot(
+        val mimeType: String,
+        val type: Int = 0
+    )
+
+    private data class ContactImportDraft(
+        val id: Long,
+        val lookupKey: String,
+        var name: String,
+        var givenName: String = "",
+        var middleName: String = "",
+        var familyName: String = "",
+        var nickname: String = "",
+        var phone: String = "",
+        var phoneHome: String = "",
+        var phoneWork: String = "",
+        var phoneOther: String = "",
+        var email: String = "",
+        var emailWork: String = "",
+        var address: String = "",
+        var addressWork: String = "",
+        var company: String = "",
+        var jobTitle: String = "",
+        var website: String = "",
+        var birthday: String = "",
+        var social: String = "",
+        var notes: String = "",
+        val photoUri: String = "",
+        val updatedAtMillis: Long = 0L
+    ) {
+        fun toContactRef(): ContactRef = ContactRef(
+            id = id,
+            lookupKey = lookupKey,
+            name = name,
+            givenName = givenName,
+            middleName = middleName,
+            familyName = familyName,
+            nickname = nickname,
+            phone = phone,
+            phoneHome = phoneHome,
+            phoneWork = phoneWork,
+            phoneOther = phoneOther,
+            email = email,
+            emailWork = emailWork,
+            address = address,
+            addressWork = addressWork,
+            company = company,
+            jobTitle = jobTitle,
+            website = website,
+            birthday = birthday,
+            social = social,
+            notes = notes,
+            photoUri = photoUri,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
     private fun canRead(context: Context): Boolean =
         context.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
@@ -873,14 +957,15 @@ object ContactsSync {
 
     fun readCandidates(context: Context): List<ContactCandidate> {
         if (!canRead(context)) return emptyList()
-        val result = mutableListOf<ContactCandidate>()
+        val contactsById = linkedMapOf<Long, ContactImportDraft>()
         val cursor = context.contentResolver.query(
             ContactsContract.Contacts.CONTENT_URI,
             arrayOf(
                 ContactsContract.Contacts._ID,
                 ContactsContract.Contacts.LOOKUP_KEY,
                 ContactsContract.Contacts.DISPLAY_NAME_PRIMARY,
-                ContactsContract.Contacts.PHOTO_THUMBNAIL_URI
+                ContactsContract.Contacts.PHOTO_THUMBNAIL_URI,
+                ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP
             ),
             null,
             null,
@@ -891,44 +976,124 @@ object ContactsSync {
             val lookupIndex = it.getColumnIndex(ContactsContract.Contacts.LOOKUP_KEY)
             val nameIndex = it.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
             val photoIndex = it.getColumnIndex(ContactsContract.Contacts.PHOTO_THUMBNAIL_URI)
+            val updatedIndex = it.getColumnIndex(ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP)
             while (it.moveToNext()) {
-                val name = it.getString(nameIndex)?.trim().orEmpty()
                 val contactId = it.getLong(idIndex)
-                val contact = contactFromId(
-                    context = context,
-                    contactId = contactId,
-                    knownLookup = it.getString(lookupIndex).orEmpty(),
-                    knownName = name
-                ) ?: ContactRef(
-                        id = it.getLong(idIndex),
-                        lookupKey = it.getString(lookupIndex).orEmpty(),
-                        name = name,
-                        givenName = "",
-                        middleName = "",
-                        familyName = "",
-                        nickname = "",
-                        phone = "",
-                        phoneHome = "",
-                        phoneWork = "",
-                        phoneOther = "",
-                        email = "",
-                        emailWork = "",
-                        address = "",
-                        addressWork = "",
-                        company = "",
-                        jobTitle = "",
-                        website = "",
-                        birthday = "",
-                        social = "",
-                        notes = "",
-                        photoUri = it.getString(photoIndex).orEmpty()
+                contactsById[contactId] = ContactImportDraft(
+                    id = contactId,
+                    lookupKey = it.getString(lookupIndex).orEmpty(),
+                    name = it.getString(nameIndex)?.trim().orEmpty(),
+                    photoUri = it.getString(photoIndex).orEmpty(),
+                    updatedAtMillis = if (updatedIndex >= 0) it.getLong(updatedIndex) else 0L
                 )
-                if (contact.name.isBlank() && contact.phone.isBlank() && contact.email.isBlank()) continue
-                result.add(contact.toCandidate())
-                if (result.size >= 500) break
+                if (contactsById.size >= 500) break
             }
         }
-        return result
+        fillContactImportDrafts(context, contactsById)
+        return contactsById.values
+            .asSequence()
+            .map { it.toContactRef() }
+            .filterNot { it.name.isBlank() && it.phone.isBlank() && it.email.isBlank() }
+            .map { it.toCandidate() }
+            .toList()
+    }
+
+    private fun fillContactImportDrafts(context: Context, contactsById: Map<Long, ContactImportDraft>) {
+        if (contactsById.isEmpty()) return
+        val mimeTypes = arrayOf(
+            ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Im.CONTENT_ITEM_TYPE
+        )
+        contactsById.keys.chunked(350).forEach { contactIds ->
+            val contactPlaceholders = contactIds.joinToString(",") { "?" }
+            val mimePlaceholders = mimeTypes.joinToString(",") { "?" }
+            val selection =
+                "${ContactsContract.Data.CONTACT_ID} IN ($contactPlaceholders) AND " +
+                    "${ContactsContract.Data.MIMETYPE} IN ($mimePlaceholders)"
+            val selectionArgs = contactIds.map { it.toString() }.toTypedArray() + mimeTypes
+            val cursor = context.contentResolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.Data.CONTACT_ID,
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.Data.DATA1,
+                    ContactsContract.Data.DATA2,
+                    ContactsContract.Data.DATA3,
+                    ContactsContract.Data.DATA4,
+                    ContactsContract.Data.DATA5
+                ),
+                selection,
+                selectionArgs,
+                null
+            ) ?: return@forEach
+            cursor.use {
+                val contactIdIndex = it.getColumnIndex(ContactsContract.Data.CONTACT_ID)
+                val mimeIndex = it.getColumnIndex(ContactsContract.Data.MIMETYPE)
+                val data1Index = it.getColumnIndex(ContactsContract.Data.DATA1)
+                val data2Index = it.getColumnIndex(ContactsContract.Data.DATA2)
+                val data3Index = it.getColumnIndex(ContactsContract.Data.DATA3)
+                val data4Index = it.getColumnIndex(ContactsContract.Data.DATA4)
+                val data5Index = it.getColumnIndex(ContactsContract.Data.DATA5)
+                while (it.moveToNext()) {
+                    val draft = contactsById[it.getLong(contactIdIndex)] ?: continue
+                    val mime = it.getString(mimeIndex).orEmpty()
+                    val data1 = it.getString(data1Index).orEmpty()
+                    val data2 = it.getString(data2Index).orEmpty()
+                    val type = data2.toIntOrNull() ?: 0
+                    val data3 = it.getString(data3Index).orEmpty()
+                    val data4 = it.getString(data4Index).orEmpty()
+                    val data5 = it.getString(data5Index).orEmpty()
+                    when (mime) {
+                        ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE -> {
+                            if (draft.name.isBlank()) draft.name = data1
+                            if (draft.givenName.isBlank()) draft.givenName = data2
+                            if (draft.familyName.isBlank()) draft.familyName = data3
+                            if (draft.middleName.isBlank()) draft.middleName = data5
+                        }
+                        ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE -> {
+                            if (draft.phone.isBlank()) draft.phone = data1
+                            when (type) {
+                                ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE -> if (draft.phone.isBlank() || draft.phone == data1) draft.phone = data1
+                                ContactsContract.CommonDataKinds.Phone.TYPE_HOME -> if (draft.phoneHome.isBlank()) draft.phoneHome = data1
+                                ContactsContract.CommonDataKinds.Phone.TYPE_WORK -> if (draft.phoneWork.isBlank()) draft.phoneWork = data1
+                                else -> if (draft.phoneOther.isBlank()) draft.phoneOther = data1
+                            }
+                        }
+                        ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE -> {
+                            when (type) {
+                                ContactsContract.CommonDataKinds.Email.TYPE_WORK -> if (draft.emailWork.isBlank()) draft.emailWork = data1
+                                else -> if (draft.email.isBlank()) draft.email = data1
+                            }
+                        }
+                        ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE -> {
+                            when (type) {
+                                ContactsContract.CommonDataKinds.StructuredPostal.TYPE_WORK -> if (draft.addressWork.isBlank()) draft.addressWork = data1
+                                else -> if (draft.address.isBlank()) draft.address = data1
+                            }
+                        }
+                        ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE -> {
+                            if (draft.company.isBlank()) draft.company = data1
+                            if (draft.jobTitle.isBlank()) draft.jobTitle = data4
+                        }
+                        ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE -> if (draft.website.isBlank()) draft.website = data1
+                        ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE -> {
+                            if (type == ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY && draft.birthday.isBlank()) draft.birthday = data1
+                        }
+                        ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE -> if (draft.nickname.isBlank()) draft.nickname = data1
+                        ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE -> if (draft.notes.isBlank()) draft.notes = data1
+                        ContactsContract.CommonDataKinds.Im.CONTENT_ITEM_TYPE -> if (draft.social.isBlank()) draft.social = data1
+                    }
+                }
+            }
+        }
     }
 
     fun linkOrCreate(context: Context, client: ClientEntity): ContactRef? {
@@ -947,14 +1112,14 @@ object ContactsSync {
         if (canRead) {
             val linked = findByLookup(context, client.contactId, client.contactLookupKey)
             if (linked != null) {
-                if (canWrite) fillMissingContactData(context, linked, client)
+                if (canWrite) writeContactData(context, linked, client)
                 val refreshed = findByLookup(context, linked.id, linked.lookupKey) ?: linked
                 return ContactSyncResult(client.withContact(refreshed, pullContactData = false), "linked")
             }
 
             val byPhone = findByPhone(context, client.phone)
             if (byPhone != null) {
-                if (canWrite) fillMissingContactData(context, byPhone, client)
+                if (canWrite) writeContactData(context, byPhone, client)
                 val refreshed = findByLookup(context, byPhone.id, byPhone.lookupKey) ?: byPhone
                 return ContactSyncResult(client.withContact(refreshed, pullContactData = false), "linked")
             }
@@ -1003,24 +1168,36 @@ object ContactsSync {
         }
     }
 
-    private fun fillMissingContactData(context: Context, contact: ContactRef, client: ClientEntity) {
+    private fun writeContactData(context: Context, contact: ContactRef, client: ClientEntity) {
         val rawContactId = rawContactIdForContact(context, contact.id) ?: return
+        val existingRows = existingDataRows(context, rawContactId)
         val operations = ArrayList<ContentProviderOperation>()
-        addMissingStructuredName(operations, rawContactId, contact, client)
-        if (contact.phone.isBlank()) addExistingPhoneInsert(operations, rawContactId, client.phone, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
-        if (contact.phoneHome.isBlank()) addExistingPhoneInsert(operations, rawContactId, client.phoneHome, ContactsContract.CommonDataKinds.Phone.TYPE_HOME)
-        if (contact.phoneWork.isBlank()) addExistingPhoneInsert(operations, rawContactId, client.phoneWork, ContactsContract.CommonDataKinds.Phone.TYPE_WORK)
-        if (contact.phoneOther.isBlank()) addExistingPhoneInsert(operations, rawContactId, client.phoneOther, ContactsContract.CommonDataKinds.Phone.TYPE_OTHER)
-        if (contact.email.isBlank()) addExistingEmailInsert(operations, rawContactId, client.email, ContactsContract.CommonDataKinds.Email.TYPE_HOME)
-        if (contact.emailWork.isBlank()) addExistingEmailInsert(operations, rawContactId, client.emailWork, ContactsContract.CommonDataKinds.Email.TYPE_WORK)
-        if (contact.address.isBlank()) addExistingPostalInsert(operations, rawContactId, client.address, ContactsContract.CommonDataKinds.StructuredPostal.TYPE_HOME)
-        if (contact.addressWork.isBlank()) addExistingPostalInsert(operations, rawContactId, client.addressWork, ContactsContract.CommonDataKinds.StructuredPostal.TYPE_WORK)
-        if (contact.company.isBlank() && contact.jobTitle.isBlank()) addExistingOrganizationInsert(operations, rawContactId, client.company, client.jobTitle)
-        if (contact.website.isBlank()) addExistingWebsiteInsert(operations, rawContactId, client.website)
-        if (contact.birthday.isBlank()) addExistingBirthdayInsert(operations, rawContactId, client.birthday)
-        if (contact.nickname.isBlank()) addExistingNicknameInsert(operations, rawContactId, client.nickname)
-        if (contact.social.isBlank()) addExistingImInsert(operations, rawContactId, client.social)
-        if (contact.notes.isBlank()) addExistingNoteInsert(operations, rawContactId, client.notes)
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME to client.name,
+                ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME to client.givenName.ifBlank { null },
+                ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME to client.middleName.ifBlank { null },
+                ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME to client.familyName.ifBlank { null }
+            )
+        )
+        upsertPhoneData(operations, existingRows, rawContactId, client.phone, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+        upsertPhoneData(operations, existingRows, rawContactId, client.phoneHome, ContactsContract.CommonDataKinds.Phone.TYPE_HOME)
+        upsertPhoneData(operations, existingRows, rawContactId, client.phoneWork, ContactsContract.CommonDataKinds.Phone.TYPE_WORK)
+        upsertPhoneData(operations, existingRows, rawContactId, client.phoneOther, ContactsContract.CommonDataKinds.Phone.TYPE_OTHER)
+        upsertEmailData(operations, existingRows, rawContactId, client.email, ContactsContract.CommonDataKinds.Email.TYPE_HOME)
+        upsertEmailData(operations, existingRows, rawContactId, client.emailWork, ContactsContract.CommonDataKinds.Email.TYPE_WORK)
+        upsertPostalData(operations, existingRows, rawContactId, client.address, ContactsContract.CommonDataKinds.StructuredPostal.TYPE_HOME)
+        upsertPostalData(operations, existingRows, rawContactId, client.addressWork, ContactsContract.CommonDataKinds.StructuredPostal.TYPE_WORK)
+        upsertOrganizationData(operations, existingRows, rawContactId, client.company, client.jobTitle)
+        upsertWebsiteData(operations, existingRows, rawContactId, client.website)
+        upsertBirthdayData(operations, existingRows, rawContactId, client.birthday)
+        upsertNicknameData(operations, existingRows, rawContactId, client.nickname)
+        upsertImData(operations, existingRows, rawContactId, client.social)
+        upsertNoteData(operations, existingRows, rawContactId, client.notes)
         if (operations.isNotEmpty()) {
             runCatching { context.contentResolver.applyBatch(ContactsContract.AUTHORITY, operations) }
         }
@@ -1381,6 +1558,223 @@ object ContactsSync {
         operations.add(builder.build())
     }
 
+    private fun upsertPhoneData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String,
+        type: Int
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
+            type = type,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.NUMBER to value,
+                ContactsContract.CommonDataKinds.Phone.TYPE to type
+            )
+        )
+    }
+
+    private fun upsertEmailData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String,
+        type: Int
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE,
+            type = type,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.Email.ADDRESS to value,
+                ContactsContract.CommonDataKinds.Email.TYPE to type
+            )
+        )
+    }
+
+    private fun upsertPostalData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String,
+        type: Int
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE,
+            type = type,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.StructuredPostal.FORMATTED_ADDRESS to value,
+                ContactsContract.CommonDataKinds.StructuredPostal.TYPE to type
+            )
+        )
+    }
+
+    private fun upsertOrganizationData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        company: String,
+        title: String
+    ) {
+        if (company.isBlank() && title.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.Organization.COMPANY to company.ifBlank { null },
+                ContactsContract.CommonDataKinds.Organization.TITLE to title.ifBlank { null }
+            )
+        )
+    }
+
+    private fun upsertWebsiteData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE,
+            values = arrayOf(ContactsContract.CommonDataKinds.Website.URL to value)
+        )
+    }
+
+    private fun upsertBirthdayData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE,
+            type = ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY,
+            values = arrayOf(
+                ContactsContract.CommonDataKinds.Event.START_DATE to value,
+                ContactsContract.CommonDataKinds.Event.TYPE to ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY
+            )
+        )
+    }
+
+    private fun upsertNicknameData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE,
+            values = arrayOf(ContactsContract.CommonDataKinds.Nickname.NAME to value)
+        )
+    }
+
+    private fun upsertImData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Im.CONTENT_ITEM_TYPE,
+            values = arrayOf(ContactsContract.CommonDataKinds.Im.DATA to value)
+        )
+    }
+
+    private fun upsertNoteData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        value: String
+    ) {
+        if (value.isBlank()) return
+        upsertContactData(
+            operations = operations,
+            existingRows = existingRows,
+            rawContactId = rawContactId,
+            mimeType = ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE,
+            values = arrayOf(ContactsContract.CommonDataKinds.Note.NOTE to value)
+        )
+    }
+
+    private fun upsertContactData(
+        operations: ArrayList<ContentProviderOperation>,
+        existingRows: Map<ContactDataSlot, Long>,
+        rawContactId: Long,
+        mimeType: String,
+        type: Int = 0,
+        values: Array<Pair<String, Any?>>
+    ) {
+        val rowId = existingRows[ContactDataSlot(mimeType, type)]
+        val builder = if (rowId != null) {
+            ContentProviderOperation.newUpdate(ContentUris.withAppendedId(ContactsContract.Data.CONTENT_URI, rowId))
+        } else {
+            ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValue(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
+                .withValue(ContactsContract.Data.MIMETYPE, mimeType)
+        }
+        values.forEach { (key, value) -> builder.withValue(key, value) }
+        operations.add(builder.build())
+    }
+
+    private fun existingDataRows(context: Context, rawContactId: Long): Map<ContactDataSlot, Long> {
+        val rows = linkedMapOf<ContactDataSlot, Long>()
+        val cursor = context.contentResolver.query(
+            ContactsContract.Data.CONTENT_URI,
+            arrayOf(
+                ContactsContract.Data._ID,
+                ContactsContract.Data.MIMETYPE,
+                ContactsContract.Data.DATA2
+            ),
+            "${ContactsContract.Data.RAW_CONTACT_ID} = ?",
+            arrayOf(rawContactId.toString()),
+            null
+        ) ?: return rows
+        cursor.use {
+            while (it.moveToNext()) {
+                val id = it.getLong(0)
+                val mimeType = it.getString(1).orEmpty()
+                val type = when (mimeType) {
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
+                    ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE,
+                    ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE,
+                    ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE -> it.getInt(2)
+                    else -> 0
+                }
+                rows.putIfAbsent(ContactDataSlot(mimeType, type), id)
+            }
+        }
+        return rows
+    }
+
     private fun rawContactIdForContact(context: Context, contactId: Long): Long? {
         val cursor = context.contentResolver.query(
             ContactsContract.RawContacts.CONTENT_URI,
@@ -1716,6 +2110,42 @@ object CalendarSync {
         }.getOrDefault(false)
     }
 
+    fun pushDayOff(
+        context: Context,
+        dayOff: DayOffEntity,
+        preferredCalendarId: Long? = null
+    ): DayOffCalendarSyncResult {
+        if (!canRead(context) || !canWrite(context)) {
+            return DayOffCalendarSyncResult(dayOff, "skipped")
+        }
+        if (dayOff.calendarEventId > 0 && findEvent(context, dayOff.calendarEventId) != null) {
+            val updated = updateDayOffEvent(context, dayOff)
+            if (updated) {
+                return DayOffCalendarSyncResult(
+                    dayOff.copy(calendarSyncedAt = now()),
+                    "updated"
+                )
+            }
+        }
+        val created = createDayOffEvent(context, dayOff, preferredCalendarId)
+        return if (created != null) {
+            DayOffCalendarSyncResult(
+                dayOff.copy(calendarEventId = created.id, calendarSyncedAt = now()),
+                "created"
+            )
+        } else {
+            DayOffCalendarSyncResult(dayOff, "skipped")
+        }
+    }
+
+    fun deleteDayOffEvent(context: Context, dayOff: DayOffEntity): Boolean {
+        if (!canWrite(context) || dayOff.calendarEventId <= 0) return false
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, dayOff.calendarEventId)
+        return runCatching {
+            context.contentResolver.delete(uri, null, null) > 0
+        }.getOrDefault(false)
+    }
+
     fun syncAppointment(
         context: Context,
         appointment: AppointmentEntity,
@@ -1768,6 +2198,55 @@ object CalendarSync {
             put(CalendarContract.Events.DTEND, startMillis + durationMillis)
             put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
             put(CalendarContract.Events.STATUS, eventStatus(appointment))
+        }
+        return runCatching {
+            context.contentResolver.update(uri, values, null, null) > 0
+        }.getOrDefault(false)
+    }
+
+    private fun createDayOffEvent(
+        context: Context,
+        dayOff: DayOffEntity,
+        preferredCalendarId: Long?
+    ): CalendarEventRef? {
+        val calendarId = writableCalendarId(context, preferredCalendarId) ?: return null
+        val startMillis = parseAppointmentMillis(dayOff.startAt) ?: return null
+        val endMillis = parseAppointmentMillis(dayOff.endAt)?.takeIf { it > startMillis } ?: return null
+        val title = dayOff.title.ifBlank { "Выходной" }
+        val values = ContentValues().apply {
+            put(CalendarContract.Events.CALENDAR_ID, calendarId)
+            put(CalendarContract.Events.TITLE, title)
+            put(CalendarContract.Events.DESCRIPTION, dayOff.notes)
+            put(CalendarContract.Events.DTSTART, startMillis)
+            put(CalendarContract.Events.DTEND, endMillis)
+            put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+            put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
+        }
+        return try {
+            val uri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+            val id = uri?.lastPathSegment?.toLongOrNull() ?: return null
+            CalendarEventRef(
+                id = id,
+                title = title,
+                startAt = dayOff.startAt,
+                durationMinutes = ((endMillis - startMillis) / 60000L).toInt().coerceAtLeast(15)
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun updateDayOffEvent(context: Context, dayOff: DayOffEntity): Boolean {
+        val startMillis = parseAppointmentMillis(dayOff.startAt) ?: return false
+        val endMillis = parseAppointmentMillis(dayOff.endAt)?.takeIf { it > startMillis } ?: return false
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, dayOff.calendarEventId)
+        val values = ContentValues().apply {
+            put(CalendarContract.Events.TITLE, dayOff.title.ifBlank { "Выходной" })
+            put(CalendarContract.Events.DESCRIPTION, dayOff.notes)
+            put(CalendarContract.Events.DTSTART, startMillis)
+            put(CalendarContract.Events.DTEND, endMillis)
+            put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+            put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
         }
         return runCatching {
             context.contentResolver.update(uri, values, null, null) > 0
@@ -1888,6 +2367,9 @@ interface AppDao {
     )
     fun observeAppointments(): Flow<List<AppointmentRow>>
 
+    @Query("SELECT * FROM day_offs ORDER BY startAt")
+    fun observeDayOffs(): Flow<List<DayOffEntity>>
+
     @Query(
         """
         SELECT o.id, COALESCE(r.name, 'Ручная задача') AS ruleName, COALESCE(c.name, '-') AS clientName,
@@ -1956,6 +2438,9 @@ interface AppDao {
     @Query("SELECT * FROM appointments")
     suspend fun appointmentsOnce(): List<AppointmentEntity>
 
+    @Query("SELECT * FROM day_offs")
+    suspend fun dayOffsOnce(): List<DayOffEntity>
+
     @Query("SELECT * FROM services ORDER BY name COLLATE NOCASE")
     suspend fun servicesOnce(): List<ServiceEntity>
 
@@ -1977,6 +2462,9 @@ interface AppDao {
     @Query("SELECT * FROM finance_transactions")
     suspend fun financeTransactionsOnce(): List<FinanceTransactionEntity>
 
+    @Query("SELECT * FROM finance_transactions WHERE id = :id LIMIT 1")
+    suspend fun financeTransactionById(id: Long): FinanceTransactionEntity?
+
     @Query("SELECT * FROM automation_rules WHERE enabled = 1")
     suspend fun enabledRules(): List<AutomationRuleEntity>
 
@@ -1988,6 +2476,9 @@ interface AppDao {
 
     @Query("SELECT * FROM appointments WHERE id = :id LIMIT 1")
     suspend fun appointmentById(id: Long): AppointmentEntity?
+
+    @Query("SELECT * FROM day_offs WHERE id = :id LIMIT 1")
+    suspend fun dayOffById(id: Long): DayOffEntity?
 
     @Query("SELECT * FROM services WHERE id = :id LIMIT 1")
     suspend fun serviceById(id: Long): ServiceEntity?
@@ -2018,8 +2509,11 @@ interface AppDao {
     @Query("SELECT id FROM outbox WHERE status IN (:statuses) AND (scheduledAt = '' OR scheduledAt <= :now) ORDER BY scheduledAt, id")
     suspend fun dueOutboxIdsByStatus(statuses: List<String>, now: String): List<Long>
 
-    @Query("SELECT COUNT(*) FROM outbox WHERE dedupeKey = :dedupeKey")
-    suspend fun countOutboxByDedupeKey(dedupeKey: String): Int
+    @Query("SELECT dedupeKey FROM outbox WHERE appointmentId = :appointmentId AND dedupeKey != ''")
+    suspend fun outboxDedupeKeysForAppointment(appointmentId: Long): List<String>
+
+    @Query("SELECT dedupeKey FROM outbox WHERE dedupeKey != ''")
+    suspend fun outboxDedupeKeys(): List<String>
 
     @Query("DELETE FROM outbox WHERE appointmentId = :appointmentId AND status IN (:statuses)")
     suspend fun clearOutboxForAppointmentByStatus(appointmentId: Long, statuses: List<String>)
@@ -2050,6 +2544,18 @@ interface AppDao {
 
     @Update
     suspend fun updateAppointment(appointment: AppointmentEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDayOff(dayOff: DayOffEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDayOffs(dayOffs: List<DayOffEntity>)
+
+    @Update
+    suspend fun updateDayOff(dayOff: DayOffEntity)
+
+    @Query("DELETE FROM day_offs WHERE id = :id")
+    suspend fun deleteDayOffById(id: Long)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertService(service: ServiceEntity): Long
@@ -2105,6 +2611,12 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFinanceTransactions(transactions: List<FinanceTransactionEntity>)
 
+    @Update
+    suspend fun updateFinanceTransaction(transaction: FinanceTransactionEntity)
+
+    @Query("DELETE FROM finance_transactions WHERE id = :id")
+    suspend fun deleteFinanceTransactionById(id: Long)
+
     @Query("UPDATE outbox SET status = :status, error = :error, sentAt = :sentAt WHERE id = :id")
     suspend fun updateOutboxStatus(id: Long, status: String, error: String = "", sentAt: String = "")
 
@@ -2116,6 +2628,9 @@ interface AppDao {
 
     @Query("DELETE FROM appointments")
     suspend fun clearAppointments()
+
+    @Query("DELETE FROM day_offs")
+    suspend fun clearDayOffs()
 
     @Query("DELETE FROM appointment_services")
     suspend fun clearAppointmentServices()
@@ -2149,6 +2664,7 @@ interface AppDao {
     entities = [
         ClientEntity::class,
         AppointmentEntity::class,
+        DayOffEntity::class,
         ServiceEntity::class,
         AppointmentServiceEntity::class,
         AutomationRuleEntity::class,
@@ -2157,7 +2673,7 @@ interface AppDao {
         SyncSettingsEntity::class,
         FinanceTransactionEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -2185,7 +2701,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_10_11,
                         MIGRATION_11_12,
                         MIGRATION_12_13,
-                        MIGRATION_13_14
+                        MIGRATION_13_14,
+                        MIGRATION_14_15
                     )
                     .fallbackToDestructiveMigration()
                     .build()
@@ -2392,6 +2909,26 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE automation_rules ADD COLUMN askBeforeRun INTEGER NOT NULL DEFAULT 0")
             }
         }
+
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS day_offs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        title TEXT NOT NULL,
+                        startAt TEXT NOT NULL,
+                        endAt TEXT NOT NULL,
+                        notes TEXT NOT NULL,
+                        calendarEventId INTEGER NOT NULL,
+                        calendarSyncedAt TEXT NOT NULL,
+                        createdAt TEXT NOT NULL,
+                        updatedAt TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
     }
 }
 
@@ -2407,6 +2944,7 @@ private object AutomationEngine {
         includeScheduledRules: Boolean
     ): Int {
         val services = dao.appointmentServicesFor(appointment.id)
+        val existingDedupeKeys = dao.outboxDedupeKeysForAppointment(appointment.id).toMutableSet()
         var created = 0
         dao.enabledRules().forEach { rule ->
             val triggerType = normalizedTriggerType(rule)
@@ -2423,7 +2961,7 @@ private object AutomationEngine {
             if (triggerType == AUTOMATION_TRIGGER_DEBT_AFTER_APPOINTMENT && appointmentRemainingCents(appointment) <= 0L) return@forEach
             val scheduledAt = scheduledAtFor(rule, triggerType, appointment) ?: return@forEach
             val dedupeKey = appointmentDedupeKey(rule, appointment, triggerType, eventType, scheduledAt)
-            if (dao.countOutboxByDedupeKey(dedupeKey) > 0) return@forEach
+            if (!existingDedupeKeys.add(dedupeKey)) return@forEach
             val outboxId = dao.insertOutbox(
                 OutboxItemEntity(
                     ruleId = rule.id,
@@ -2454,12 +2992,14 @@ private object AutomationEngine {
         val clients = dao.clientsOnce().associateBy { it.id }
         val appointments = dao.appointmentsOnce()
             .filter { it.status != APPOINTMENT_STATUS_CANCELLED }
+        val appointmentsByClient = appointments.groupBy { it.clientId }
         val servicesByAppointment = dao.appointmentServicesOnce().groupBy { it.appointmentId }
+        val existingDedupeKeys = dao.outboxDedupeKeys().toMutableSet()
         val now = LocalDateTime.now()
         var created = 0
         rules.forEach { rule ->
             clients.values.forEach { client ->
-                val clientAppointments = appointments
+                val clientAppointments = appointmentsByClient[client.id].orEmpty()
                     .filter { it.clientId == client.id && ruleMatchesServices(rule, servicesByAppointment[it.id].orEmpty()) }
                 val hasFuture = clientAppointments.any { appointment ->
                     val start = parseAppointmentDateTime(appointment.startAt)
@@ -2476,7 +3016,7 @@ private object AutomationEngine {
                 val dueAt = lastEnd.plusDays(rule.retentionDays.coerceAtLeast(1).toLong())
                 if (dueAt.isAfter(now)) return@forEach
                 val dedupeKey = "rule:${rule.id}:retention:client:${client.id}:last:${last.id}"
-                if (dao.countOutboxByDedupeKey(dedupeKey) > 0) return@forEach
+                if (!existingDedupeKeys.add(dedupeKey)) return@forEach
                 val lastServices = servicesByAppointment[last.id].orEmpty()
                 val outboxId = dao.insertOutbox(
                     OutboxItemEntity(
@@ -3107,7 +3647,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val maintenancePrefs = application.getSharedPreferences(STARTUP_MAINTENANCE_PREFS, Context.MODE_PRIVATE)
     private var deferredMaintenanceStarted = false
     private val eagerDataSharing = SharingStarted.Eagerly
-    private val activeDataSharing = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000)
+    private val activeDataSharing = SharingStarted.WhileSubscribed(stopTimeoutMillis = 30_000)
 
     val clients: StateFlow<List<ClientEntity>> = dao.observeClients()
         .flowOn(Dispatchers.IO)
@@ -3120,6 +3660,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         .map { buildAppointmentIndex(it) }
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, activeDataSharing, AppointmentIndex.Empty)
+    val dayOffs: StateFlow<List<DayOffEntity>> = dao.observeDayOffs()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val dayOffIndex: StateFlow<DayOffIndex> = dayOffs
+        .map { buildDayOffIndex(it) }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, activeDataSharing, DayOffIndex.Empty)
     val services: StateFlow<List<ServiceEntity>> = dao.observeServices()
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, activeDataSharing, emptyList())
@@ -3192,6 +3739,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (message == expectedMessage) {
             message = ""
         }
+    }
+
+    fun showMessage(text: String) {
+        message = text
     }
 
     fun setLauncherIcon(context: Context, mode: String) {
@@ -3307,6 +3858,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateClient(context: Context, original: ClientEntity, draft: ClientDraft) {
+        val clientDraft = draft.toEntity()
+        if (clientDraft.name.isBlank()) {
+            message = "Укажи имя клиента"
+            return
+        }
+        viewModelScope.launch {
+            val phoneKey = normalizePhone(clientDraft.phone)
+            val duplicate = dao.clientsOnce().any { client ->
+                client.id != original.id &&
+                    (phoneKey.isNotEmpty() && phoneKey == client.phoneKey ||
+                        phoneKey.isEmpty() && client.name.equals(clientDraft.name, ignoreCase = true))
+            }
+            if (duplicate) {
+                message = "Клиент с таким номером уже есть"
+                return@launch
+            }
+            var updatedClient = clientDraft.copy(
+                id = original.id,
+                contactId = original.contactId,
+                contactLookupKey = original.contactLookupKey,
+                contactSyncedAt = original.contactSyncedAt,
+                createdAt = original.createdAt,
+                updatedAt = now()
+            )
+            dao.updateClient(updatedClient)
+            val contactsMode = syncModeFor(SYNC_RESOURCE_CONTACTS)
+            val shouldAutoSync = shouldAutoSyncToSystem(contactsMode)
+            val hasPermissions = hasContactsPermissions(context.applicationContext)
+            val autoSynced = if (shouldAutoSync && hasPermissions) {
+                val result = withContext(Dispatchers.IO) {
+                    ContactsSync.pushClient(context.applicationContext, updatedClient)
+                }
+                if (result.client != updatedClient) {
+                    updatedClient = result.client
+                    dao.updateClient(updatedClient)
+                }
+                result.action != "skipped"
+            } else {
+                false
+            }
+            refreshCounts()
+            message = when {
+                autoSynced -> "Клиент обновлен и синхронизирован с контактами"
+                shouldAutoSync && !hasPermissions -> "Клиент обновлен локально. Разрешения для контактов включаются в настройках"
+                else -> "Клиент обновлен"
+            }
+        }
+    }
+
     fun importContacts(selected: List<ContactCandidate>) {
         if (selected.isEmpty()) {
             message = "Выбери хотя бы один контакт"
@@ -3315,15 +3916,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             var added = 0
             var skipped = 0
+            val existingClients = dao.clientsOnce()
+            val knownPhoneKeys = existingClients
+                .mapNotNull { it.phoneKey.takeIf { key -> key.isNotBlank() } }
+                .toMutableSet()
+            val knownNames = existingClients
+                .map { it.name.lowercase(Locale.getDefault()) }
+                .toMutableSet()
+            val clientsToInsert = mutableListOf<ClientEntity>()
             selected.forEach { contact ->
-                if (clientExists(contact.name, contact.phone)) {
+                val phoneKey = normalizePhone(contact.phone)
+                val nameKey = contact.name.lowercase(Locale.getDefault())
+                val duplicate = if (phoneKey.isNotBlank()) {
+                    phoneKey in knownPhoneKeys
+                } else {
+                    nameKey in knownNames
+                }
+                if (duplicate) {
                     skipped++
                 } else {
-                    dao.insertClient(
-                        contact.toClientEntity()
-                    )
+                    clientsToInsert.add(contact.toClientEntity())
+                    if (phoneKey.isNotBlank()) knownPhoneKeys.add(phoneKey)
+                    knownNames.add(nameKey)
                     added++
                 }
+            }
+            if (clientsToInsert.isNotEmpty()) {
+                dao.insertClients(clientsToInsert)
             }
             refreshCounts()
             message = "Добавлено: $added" + if (skipped > 0) ", пропущено дублей: $skipped" else ""
@@ -3354,22 +3973,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             var linked = 0
             var created = 0
             var skipped = 0
-            dao.clientsOnce().forEach { client ->
-                val result = withContext(Dispatchers.IO) {
-                    when (effectiveMode) {
+            withContext(Dispatchers.IO) {
+                dao.clientsOnce().forEach { client ->
+                    val result = when (effectiveMode) {
                         SYNC_MODE_LOCAL_TO_SYSTEM -> ContactsSync.pushClient(appContext, client)
                         SYNC_MODE_SYSTEM_TO_LOCAL -> ContactsSync.pullClient(appContext, client)
                         else -> ContactsSync.syncClient(appContext, client)
                     }
-                }
-                if (result.client != client) {
-                    dao.updateClient(result.client)
-                }
-                when (result.action) {
-                    "pulled" -> pulled++
-                    "linked" -> linked++
-                    "created" -> created++
-                    else -> skipped++
+                    if (result.client != client) {
+                        dao.updateClient(result.client)
+                    }
+                    when (result.action) {
+                        "pulled" -> pulled++
+                        "linked" -> linked++
+                        "created" -> created++
+                        else -> skipped++
+                    }
                 }
             }
             markSyncRun(SYNC_RESOURCE_CONTACTS)
@@ -3871,6 +4490,139 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun addDayOff(
+        context: Context,
+        title: String,
+        startAt: String,
+        endAt: String,
+        notes: String,
+        replaceDayOffIds: List<Long> = emptyList()
+    ) {
+        val normalizedTitle = title.trim().ifBlank { "Выходной" }
+        if (!dayOffRangeIsValid(startAt, endAt)) {
+            message = "Укажи корректное время выходного"
+            return
+        }
+        viewModelScope.launch {
+            var dayOff = DayOffEntity(
+                title = normalizedTitle,
+                startAt = startAt.trim(),
+                endAt = endAt.trim(),
+                notes = notes.trim()
+            )
+            val calendarMode = syncModeFor(SYNC_RESOURCE_CALENDAR)
+            val shouldAutoSync = shouldAutoSyncToSystem(calendarMode)
+            val hasPermissions = hasCalendarPermissions(context.applicationContext)
+            var calendarMessage = ""
+            if (shouldAutoSync) {
+                if (hasPermissions) {
+                    val result = withContext(Dispatchers.IO) {
+                        CalendarSync.pushDayOff(context.applicationContext, dayOff, selectedCalendarId())
+                    }
+                    dayOff = result.dayOff
+                    calendarMessage = if (dayOff.calendarEventId > 0) " Календарь обновлен." else ""
+                } else {
+                    calendarMessage = " Календарь не обновлен: нет разрешений."
+                }
+            }
+            dao.insertDayOff(dayOff)
+            val replacedCount = deleteDayOffsForReplacement(context.applicationContext, replaceDayOffIds)
+            val replaceMessage = if (replacedCount > 0) " Заменено выходных: $replacedCount." else ""
+            message = "Выходной сохранен.$replaceMessage$calendarMessage"
+        }
+    }
+
+    fun updateDayOff(
+        context: Context,
+        dayOffId: Long,
+        title: String,
+        startAt: String,
+        endAt: String,
+        notes: String,
+        replaceDayOffIds: List<Long> = emptyList()
+    ) {
+        val normalizedTitle = title.trim().ifBlank { "Выходной" }
+        if (dayOffId <= 0L || !dayOffRangeIsValid(startAt, endAt)) {
+            message = "Укажи корректное время выходного"
+            return
+        }
+        viewModelScope.launch {
+            val current = dao.dayOffById(dayOffId)
+            if (current == null) {
+                message = "Выходной не найден"
+                return@launch
+            }
+            var updated = current.copy(
+                title = normalizedTitle,
+                startAt = startAt.trim(),
+                endAt = endAt.trim(),
+                notes = notes.trim(),
+                updatedAt = now()
+            )
+            val calendarMode = syncModeFor(SYNC_RESOURCE_CALENDAR)
+            val shouldAutoSync = shouldAutoSyncToSystem(calendarMode)
+            val hasPermissions = hasCalendarPermissions(context.applicationContext)
+            var calendarMessage = ""
+            if (shouldAutoSync) {
+                if (hasPermissions) {
+                    val result = withContext(Dispatchers.IO) {
+                        CalendarSync.pushDayOff(context.applicationContext, updated, selectedCalendarId())
+                    }
+                    updated = result.dayOff
+                    calendarMessage = if (updated.calendarEventId > 0) " Календарь обновлен." else ""
+                } else {
+                    calendarMessage = " Календарь не обновлен: нет разрешений."
+                }
+            }
+            dao.updateDayOff(updated)
+            val replacedCount = deleteDayOffsForReplacement(
+                context = context.applicationContext,
+                ids = replaceDayOffIds.filter { it != dayOffId }
+            )
+            val replaceMessage = if (replacedCount > 0) " Заменено выходных: $replacedCount." else ""
+            message = "Выходной обновлен.$replaceMessage$calendarMessage"
+        }
+    }
+
+    private suspend fun deleteDayOffsForReplacement(context: Context, ids: List<Long>): Int {
+        var deletedCount = 0
+        ids.distinct().filter { it > 0L }.forEach { id ->
+            val current = dao.dayOffById(id) ?: return@forEach
+            if (current.calendarEventId > 0) {
+                withContext(Dispatchers.IO) {
+                    CalendarSync.deleteDayOffEvent(context.applicationContext, current)
+                }
+            }
+            dao.deleteDayOffById(id)
+            deletedCount++
+        }
+        return deletedCount
+    }
+
+    fun deleteDayOff(context: Context, dayOffId: Long) {
+        if (dayOffId <= 0L) return
+        viewModelScope.launch {
+            val current = dao.dayOffById(dayOffId)
+            if (current == null) {
+                message = "Выходной не найден"
+                return@launch
+            }
+            val calendarDeleted = if (current.calendarEventId > 0) {
+                withContext(Dispatchers.IO) {
+                    CalendarSync.deleteDayOffEvent(context.applicationContext, current)
+                }
+            } else {
+                false
+            }
+            dao.deleteDayOffById(dayOffId)
+            message = when {
+                current.calendarEventId > 0 && calendarDeleted -> "Выходной удален, событие календаря удалено"
+                current.calendarEventId > 0 -> "Выходной удален локально. Событие календаря не удалено"
+                else -> "Выходной удален"
+            }
+        }
+    }
+
     fun saveService(
         name: String,
         price: String,
@@ -3917,30 +4669,81 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         date: String,
         paymentMethod: String,
         notes: String
+    ) = saveFinanceTransaction(
+        transactionId = null,
+        type = type,
+        amount = amount,
+        title = title,
+        category = category,
+        date = date,
+        paymentMethod = paymentMethod,
+        notes = notes
+    )
+
+    fun saveFinanceTransaction(
+        transactionId: Long?,
+        type: String,
+        amount: String,
+        title: String,
+        category: String,
+        date: String,
+        paymentMethod: String,
+        notes: String
     ) {
         val normalizedType = if (type == FINANCE_TYPE_EXPENSE) FINANCE_TYPE_EXPENSE else FINANCE_TYPE_INCOME
         val amountCents = parseMoneyToCents(amount)
+        val normalizedTitle = title.trim()
         if (amountCents <= 0L) {
             message = "Укажи сумму"
             return
         }
-        if (title.trim().isBlank()) {
+        if (normalizedTitle.isBlank()) {
             message = "Укажи название операции"
             return
         }
         viewModelScope.launch {
-            dao.insertFinanceTransaction(
-                FinanceTransactionEntity(
-                    type = normalizedType,
-                    amountCents = amountCents,
-                    title = title.trim(),
-                    category = category.trim(),
-                    date = date.ifBlank { financeDateString(LocalDate.now()) },
-                    paymentMethod = paymentMethod.trim(),
-                    notes = notes.trim()
+            val normalizedDate = date.ifBlank { financeDateString(LocalDate.now()) }
+            if (transactionId != null && transactionId > 0L) {
+                val current = dao.financeTransactionById(transactionId)
+                if (current == null) {
+                    message = "Операция не найдена"
+                    return@launch
+                }
+                dao.updateFinanceTransaction(
+                    current.copy(
+                        type = normalizedType,
+                        amountCents = amountCents,
+                        title = normalizedTitle,
+                        category = category.trim(),
+                        date = normalizedDate,
+                        paymentMethod = paymentMethod.trim(),
+                        notes = notes.trim(),
+                        updatedAt = now()
+                    )
                 )
-            )
-            message = if (normalizedType == FINANCE_TYPE_EXPENSE) "Расход добавлен" else "Доход добавлен"
+                message = "Операция обновлена"
+            } else {
+                dao.insertFinanceTransaction(
+                    FinanceTransactionEntity(
+                        type = normalizedType,
+                        amountCents = amountCents,
+                        title = normalizedTitle,
+                        category = category.trim(),
+                        date = normalizedDate,
+                        paymentMethod = paymentMethod.trim(),
+                        notes = notes.trim()
+                    )
+                )
+                message = if (normalizedType == FINANCE_TYPE_EXPENSE) "Расход добавлен" else "Доход добавлен"
+            }
+        }
+    }
+
+    fun deleteFinanceTransaction(id: Long) {
+        if (id <= 0L) return
+        viewModelScope.launch {
+            dao.deleteFinanceTransactionById(id)
+            message = "Операция удалена"
         }
     }
 
@@ -3998,6 +4801,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun cancelAppointmentPayment(appointmentId: Long) {
+        viewModelScope.launch {
+            val appointment = dao.appointmentById(appointmentId)
+            if (appointment == null) {
+                message = "Запись не найдена"
+                return@launch
+            }
+            if (appointment.paidAmountCents <= 0L) {
+                message = "Оплата уже отменена"
+                return@launch
+            }
+            dao.updateAppointment(
+                appointment.copy(
+                    paidAmountCents = 0L,
+                    paymentStatus = PAYMENT_STATUS_UNPAID,
+                    paymentMethod = "",
+                    paidAt = "",
+                    updatedAt = now()
+                )
+            )
+            message = "Оплата отменена"
+        }
+    }
+
     fun syncCalendar(context: Context) {
         val appContext = context.applicationContext
         viewModelScope.launch {
@@ -4016,27 +4843,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             var created = 0
             var updated = 0
             var skipped = 0
-            dao.appointmentsOnce().forEach { appointment ->
-                val client = dao.clientById(appointment.clientId)
-                if (client == null) {
-                    skipped++
-                    return@forEach
-                }
-                val result = withContext(Dispatchers.IO) {
-                    when (effectiveMode) {
+            withContext(Dispatchers.IO) {
+                val clientsById = dao.clientsOnce().associateBy { it.id }
+                dao.appointmentsOnce().forEach { appointment ->
+                    val client = clientsById[appointment.clientId]
+                    if (client == null) {
+                        skipped++
+                        return@forEach
+                    }
+                    val result = when (effectiveMode) {
                         SYNC_MODE_LOCAL_TO_SYSTEM -> CalendarSync.pushAppointment(appContext, appointment, client, preferredCalendarId)
                         SYNC_MODE_SYSTEM_TO_LOCAL -> CalendarSync.pullAppointment(appContext, appointment, client)
                         else -> CalendarSync.syncAppointment(appContext, appointment, client, preferredCalendarId)
                     }
-                }
-                if (result.appointment != appointment) {
-                    dao.updateAppointment(result.appointment)
-                }
-                when (result.action) {
-                    "pulled" -> pulled++
-                    "created" -> created++
-                    "updated" -> updated++
-                    else -> skipped++
+                    if (result.appointment != appointment) {
+                        dao.updateAppointment(result.appointment)
+                    }
+                    when (result.action) {
+                        "pulled" -> pulled++
+                        "created" -> created++
+                        "updated" -> updated++
+                        else -> skipped++
+                    }
                 }
             }
             markSyncRun(SYNC_RESOURCE_CALENDAR)
@@ -4440,13 +5268,16 @@ object BackupJson {
         val dao = db.dao()
         return JSONObject()
             .put("app", "Offline Beauty CRM")
-            .put("schema_version", 14)
+            .put("schema_version", 15)
             .put("generated_at", now())
             .put("clients", JSONArray().also { array ->
                 dao.clientsOnce().forEach { array.put(JSONObject(it.toMap())) }
             })
             .put("appointments", JSONArray().also { array ->
                 dao.appointmentsOnce().forEach { array.put(JSONObject(it.toMap())) }
+            })
+            .put("day_offs", JSONArray().also { array ->
+                dao.dayOffsOnce().forEach { array.put(JSONObject(it.toMap())) }
             })
             .put("services", JSONArray().also { array ->
                 dao.servicesOnce().forEach { array.put(JSONObject(it.toMap())) }
@@ -4479,6 +5310,7 @@ object BackupJson {
             dao.clearRules()
             dao.clearAppointmentServices()
             dao.clearAppointments()
+            dao.clearDayOffs()
             dao.clearServices()
             dao.clearClients()
             dao.clearSettings()
@@ -4486,6 +5318,7 @@ object BackupJson {
             val importedAppointments = json.optJSONArray("appointments").toAppointments()
             dao.insertClients(json.optJSONArray("clients").toClients())
             dao.insertAppointments(importedAppointments)
+            dao.insertDayOffs(json.optJSONArray("day_offs").toDayOffs())
             dao.insertServices(json.optJSONArray("services").toServices())
             dao.insertAppointmentServices(json.optJSONArray("appointment_services").toAppointmentServices(importedAppointments))
             dao.insertRules(json.optJSONArray("automation_rules").toRules())
@@ -4507,7 +5340,7 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     val colorScheme = remember(context, darkTheme, dynamicColorRefreshKey) {
         appColorScheme(context = context, darkTheme = darkTheme)
     }
-    val pendingConfirmationRows by viewModel.pendingConfirmations.collectAsStateWithLifecycle(initialValue = emptyList())
+    val pendingConfirmationRows by viewModel.pendingConfirmations.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf(Screen.Clients) }
     var screenHistory by remember { mutableStateOf<List<Screen>>(emptyList()) }
     var clientSubScreen by rememberSaveable { mutableStateOf(ClientSubScreen.List) }
@@ -4528,10 +5361,13 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
             clientSubScreen == ClientSubScreen.Import)
     val showTopChrome = showMainChrome && screen != Screen.Appointments
     val currentTopBarTitle = when {
+        screen == Screen.Clients && clientSubScreen == ClientSubScreen.Import -> "Контакты телефона"
         screen == Screen.Settings -> settingsSubScreen.label
         else -> screen.label
     }
-    val showTopBack = screen == Screen.Settings && settingsSubScreen != SettingsSubScreen.Menu
+    val showTopBack =
+        screen == Screen.Clients && clientSubScreen == ClientSubScreen.Import ||
+            screen == Screen.Settings && settingsSubScreen != SettingsSubScreen.Menu
     val shouldHandleBack = screen != Screen.Clients ||
         clientSubScreen != ClientSubScreen.List ||
         settingsSubScreen != SettingsSubScreen.Menu ||
@@ -4588,6 +5424,10 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     }
 
     fun navigateBack() {
+        if (screen == Screen.Clients && clientSubScreen == ClientSubScreen.Edit && selectedClientId != null) {
+            clientSubScreen = ClientSubScreen.Detail
+            return
+        }
         if (screen == Screen.Clients && clientSubScreen != ClientSubScreen.List) {
             clientSubScreen = ClientSubScreen.List
             selectedClientId = null
@@ -4657,7 +5497,12 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                         title = { Text(currentTopBarTitle, fontWeight = FontWeight.Bold) },
                         navigationIcon = {
                             if (showTopBack) {
-                                IconButton(onClick = { settingsSubScreen = SettingsSubScreen.Menu }) {
+                                IconButton(onClick = {
+                                    when {
+                                        screen == Screen.Clients && clientSubScreen == ClientSubScreen.Import -> clientSubScreen = ClientSubScreen.List
+                                        screen == Screen.Settings && settingsSubScreen != SettingsSubScreen.Menu -> settingsSubScreen = SettingsSubScreen.Menu
+                                    }
+                                }) {
                                     Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                                 }
                             }
@@ -4693,14 +5538,14 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     when (screen) {
                         Screen.Clients -> {
-                            val clients by viewModel.clients.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val clients by viewModel.clients.collectAsStateWithLifecycle()
                             val appointmentIndex = if (clientSubScreen == ClientSubScreen.Detail) {
                                 viewModel.appointmentIndex.collectAsStateWithLifecycle().value
                             } else {
                                 AppointmentIndex.Empty
                             }
                             val financeTransactions = if (clientSubScreen == ClientSubScreen.Detail) {
-                                viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList()).value
+                                viewModel.financeTransactions.collectAsStateWithLifecycle().value
                             } else {
                                 emptyList()
                             }
@@ -4738,15 +5583,17 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                         Screen.Appointments -> {
-                            val clients by viewModel.clients.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val clients by viewModel.clients.collectAsStateWithLifecycle()
                             val appointmentIndex by viewModel.appointmentIndex.collectAsStateWithLifecycle()
-                            val services by viewModel.services.collectAsStateWithLifecycle(initialValue = emptyList())
-                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val dayOffIndex by viewModel.dayOffIndex.collectAsStateWithLifecycle()
+                            val services by viewModel.services.collectAsStateWithLifecycle()
+                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle()
                             AppointmentsScreen(
                                 viewModel = viewModel,
                                 clients = clients,
                                 appointments = appointmentIndex.appointments,
                                 appointmentIndex = appointmentIndex,
+                                dayOffIndex = dayOffIndex,
                                 services = services,
                                 financeTransactions = financeTransactions,
                                 requestedAppointmentId = requestedAppointmentId,
@@ -4760,7 +5607,7 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                         }
                         Screen.Finance -> {
                             val appointmentIndex by viewModel.appointmentIndex.collectAsStateWithLifecycle()
-                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle()
                             FinanceScreen(
                                 viewModel = viewModel,
                                 appointmentIndex = appointmentIndex,
@@ -4769,10 +5616,10 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                         Screen.Settings -> {
-                            val services by viewModel.services.collectAsStateWithLifecycle(initialValue = emptyList())
-                            val syncSettings by viewModel.syncSettings.collectAsStateWithLifecycle(initialValue = emptyList())
-                            val rules by viewModel.rules.collectAsStateWithLifecycle(initialValue = emptyList())
-                            val outbox by viewModel.outbox.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val services by viewModel.services.collectAsStateWithLifecycle()
+                            val syncSettings by viewModel.syncSettings.collectAsStateWithLifecycle()
+                            val rules by viewModel.rules.collectAsStateWithLifecycle()
+                            val outbox by viewModel.outbox.collectAsStateWithLifecycle()
                             SettingsScreen(
                                 viewModel = viewModel,
                                 services = services,
@@ -4845,6 +5692,7 @@ private enum class ClientSubScreen {
     List,
     Import,
     Form,
+    Edit,
     Detail
 }
 
@@ -4865,6 +5713,12 @@ private enum class AppointmentCalendarView(val label: String) {
     ThreeDays("3 дня"),
     Week("Неделя"),
     Month("Месяц")
+}
+
+private enum class FinancePeriodMode(val label: String) {
+    Week("Неделя"),
+    Month("Месяц"),
+    Year("Год")
 }
 
 private enum class AppointmentMonthMode {
@@ -4902,6 +5756,38 @@ private sealed class AppointmentConflictAction {
         override val newStartAt: String = movingStartAt
         override val newDurationMinutes: Int = movingDurationMinutes
     }
+}
+
+private data class DayOffAppointmentConflict(
+    val startAt: String,
+    val endAt: String,
+    val appointmentIds: List<Long>
+)
+
+private data class DayOffMergeConflict(
+    val startAt: String,
+    val endAt: String,
+    val dayOffIds: List<Long>,
+    val mergedStartAt: String,
+    val mergedEndAt: String
+)
+
+private data class DayOffOverlapAnalysis(
+    val covered: List<DayOffEntity>,
+    val mergeRequired: List<DayOffEntity>
+) {
+    val replacementIds: List<Long>
+        get() = (covered + mergeRequired).map { it.id }.distinct()
+}
+
+private data class DayOffWeekSpan(
+    val first: Int,
+    val last: Int,
+    val startsHere: Boolean,
+    val endsHere: Boolean
+) {
+    val length: Int
+        get() = last - first + 1
 }
 
 @Composable
@@ -5105,6 +5991,24 @@ private fun systemMaterialYouColorScheme(context: Context, darkTheme: Boolean) =
 private fun systemColor(context: Context, colorRes: Int): Color = Color(context.getColor(colorRes))
 
 @Composable
+private fun RoundedSearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        placeholder = { Text(placeholder) },
+        singleLine = true,
+        shape = RoundedCornerShape(28.dp),
+        modifier = modifier
+    )
+}
+
+@Composable
 private fun ClientsScreen(
     viewModel: AppViewModel,
     clients: List<ClientEntity>,
@@ -5126,6 +6030,19 @@ private fun ClientsScreen(
         ClientFormScreen(viewModel, onBack = { onSubScreenChange(ClientSubScreen.List) })
         return
     }
+    if (subScreen == ClientSubScreen.Edit) {
+        val selectedClient = clients.firstOrNull { it.id == selectedClientId }
+        if (selectedClient == null) {
+            EmptyText("Клиент не найден.")
+        } else {
+            ClientFormScreen(
+                viewModel = viewModel,
+                client = selectedClient,
+                onBack = { onSubScreenChange(ClientSubScreen.Detail) }
+            )
+        }
+        return
+    }
     if (subScreen == ClientSubScreen.Detail) {
         val selectedClient = clients.firstOrNull { it.id == selectedClientId }
         if (selectedClient == null) {
@@ -5137,6 +6054,7 @@ private fun ClientsScreen(
                 appointments = appointmentIndex.byClientId[selectedClient.id].orEmpty(),
                 financeTransactions = financeTransactions,
                 onBack = { onSubScreenChange(ClientSubScreen.List) },
+                onEditClient = { onSubScreenChange(ClientSubScreen.Edit) },
                 onOpenAppointment = onOpenAppointment,
                 onCreateAppointment = onCreateAppointment
             )
@@ -5145,6 +6063,8 @@ private fun ClientsScreen(
     }
 
     var query by remember { mutableStateOf("") }
+    var showAddClientMenu by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
     val groupedClients by remember(clients, query) {
         derivedStateOf {
             clients
@@ -5161,44 +6081,32 @@ private fun ClientsScreen(
                 .toSortedMap()
         }
     }
+    val visibleClientCount = remember(groupedClients) {
+        groupedClients.values.sumOf { it.size }
+    }
+    val showScrollHandle = visibleClientCount > 8
+    BackHandler(enabled = showAddClientMenu) {
+        showAddClientMenu = false
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                top = 12.dp,
+                bottom = 96.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             item {
-                OutlinedTextField(
+                RoundedSearchField(
                     value = query,
                     onValueChange = { query = it },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                    placeholder = { Text("Поиск в клиентах") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(28.dp),
+                    placeholder = "Поиск в клиентах",
                     modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp, bottom = 6.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { onSubScreenChange(ClientSubScreen.Import) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Из контактов")
-                    }
-                }
-            }
-            item {
-                Text(
-                    text = "Все клиенты (${clients.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
                 )
             }
             if (groupedClients.isEmpty()) {
@@ -5206,71 +6114,179 @@ private fun ClientsScreen(
             } else {
                 groupedClients.forEach { (section, group) ->
                     item(key = "section-$section") {
-                        Text(
-                            text = section,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 8.dp, top = 10.dp, bottom = 2.dp)
-                        )
+                        ClientSectionHeader(section = section)
                     }
                     items(group, key = { it.id }) { client ->
                         ClientListRow(client, onClick = { onOpenClient(client.id) })
                     }
                 }
             }
+            item(key = "clients-count-footer") {
+                Text(
+                    text = if (query.isBlank()) {
+                        "Всего клиентов: ${clients.size}"
+                    } else {
+                        "Найдено: $visibleClientCount из ${clients.size}"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 14.dp, bottom = 10.dp)
+                )
+            }
         }
 
-        FloatingActionButton(
-            onClick = { onSubScreenChange(ClientSubScreen.Form) },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp)
+        if (showScrollHandle) {
+            ClientScrollHandle(
+                listState = listState,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 0.dp)
+            )
+        }
+
+        if (showAddClientMenu) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.42f))
+                    .clickable { showAddClientMenu = false }
+            )
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 20.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ClientAddMenuAction(
+                    icon = Icons.Filled.Phone,
+                    label = "Из контактов",
+                    onClick = {
+                        showAddClientMenu = false
+                        onSubScreenChange(ClientSubScreen.Import)
+                    }
+                )
+                ClientAddMenuAction(
+                    icon = Icons.Filled.Person,
+                    label = "Новый клиент",
+                    onClick = {
+                        showAddClientMenu = false
+                        onSubScreenChange(ClientSubScreen.Form)
+                    }
+                )
+                FloatingActionButton(
+                    onClick = { showAddClientMenu = false },
+                    shape = CircleShape,
+                    modifier = Modifier.size(64.dp)
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                }
+            }
+        } else {
+            FloatingActionButton(
+                onClick = { showAddClientMenu = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp)
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Добавить клиента")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClientAddMenuAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(28.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        tonalElevation = 4.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Добавить клиента")
+            Icon(icon, contentDescription = null)
+            Text(
+                label,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
         }
     }
 }
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-private fun ClientFormScreen(viewModel: AppViewModel, onBack: () -> Unit) {
+private fun ClientFormScreen(
+    viewModel: AppViewModel,
+    onBack: () -> Unit,
+    client: ClientEntity? = null
+) {
     val context = LocalContext.current
-    var name by remember { mutableStateOf("") }
-    var givenName by remember { mutableStateOf("") }
-    var middleName by remember { mutableStateOf("") }
-    var familyName by remember { mutableStateOf("") }
-    var nickname by remember { mutableStateOf("") }
-    var phone by remember { mutableStateOf("") }
-    var phoneHome by remember { mutableStateOf("") }
-    var phoneWork by remember { mutableStateOf("") }
-    var phoneOther by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
-    var emailWork by remember { mutableStateOf("") }
-    var address by remember { mutableStateOf("") }
-    var addressWork by remember { mutableStateOf("") }
-    var company by remember { mutableStateOf("") }
-    var jobTitle by remember { mutableStateOf("") }
-    var website by remember { mutableStateOf("") }
-    var birthday by remember { mutableStateOf("") }
-    var social by remember { mutableStateOf("") }
-    var notes by remember { mutableStateOf("") }
-    var photoUri by remember { mutableStateOf("") }
+    val editingClientId = client?.id ?: 0L
+    val hasStructuredName = client?.let {
+        it.givenName.isNotBlank() || it.middleName.isNotBlank() || it.familyName.isNotBlank()
+    } ?: false
+    val structuredDisplayName = client?.let {
+        listOf(it.givenName, it.middleName, it.familyName)
+            .map { part -> part.trim() }
+            .filter { part -> part.isNotBlank() }
+            .joinToString(" ")
+    }.orEmpty()
+    val showInitialDisplayName = client != null &&
+        client.name.isNotBlank() &&
+        (!hasStructuredName || client.name != structuredDisplayName)
+    var name by remember(editingClientId) {
+        mutableStateOf(if (showInitialDisplayName) client?.name.orEmpty() else "")
+    }
+    var givenName by remember(editingClientId) { mutableStateOf(client?.givenName.orEmpty()) }
+    var middleName by remember(editingClientId) { mutableStateOf(client?.middleName.orEmpty()) }
+    var familyName by remember(editingClientId) { mutableStateOf(client?.familyName.orEmpty()) }
+    var nickname by remember(editingClientId) { mutableStateOf(client?.nickname.orEmpty()) }
+    var phone by remember(editingClientId) { mutableStateOf(client?.phone.orEmpty()) }
+    var phoneHome by remember(editingClientId) { mutableStateOf(client?.phoneHome.orEmpty()) }
+    var phoneWork by remember(editingClientId) { mutableStateOf(client?.phoneWork.orEmpty()) }
+    var phoneOther by remember(editingClientId) { mutableStateOf(client?.phoneOther.orEmpty()) }
+    var email by remember(editingClientId) { mutableStateOf(client?.email.orEmpty()) }
+    var emailWork by remember(editingClientId) { mutableStateOf(client?.emailWork.orEmpty()) }
+    var address by remember(editingClientId) { mutableStateOf(client?.address.orEmpty()) }
+    var addressWork by remember(editingClientId) { mutableStateOf(client?.addressWork.orEmpty()) }
+    var company by remember(editingClientId) { mutableStateOf(client?.company.orEmpty()) }
+    var jobTitle by remember(editingClientId) { mutableStateOf(client?.jobTitle.orEmpty()) }
+    var website by remember(editingClientId) { mutableStateOf(client?.website.orEmpty()) }
+    var birthday by remember(editingClientId) { mutableStateOf(client?.birthday.orEmpty()) }
+    var social by remember(editingClientId) { mutableStateOf(client?.social.orEmpty()) }
+    var notes by remember(editingClientId) { mutableStateOf(client?.notes.orEmpty()) }
+    var photoUri by remember(editingClientId) { mutableStateOf(client?.contactPhotoUri.orEmpty()) }
     var pendingManualAdd by remember { mutableStateOf(false) }
-    var showPhoneHome by remember { mutableStateOf(false) }
-    var showPhoneWork by remember { mutableStateOf(false) }
-    var showPhoneOther by remember { mutableStateOf(false) }
-    var showEmailPersonal by remember { mutableStateOf(false) }
-    var showEmailWork by remember { mutableStateOf(false) }
-    var showBirthday by remember { mutableStateOf(false) }
+    var showPhoneHome by remember(editingClientId) { mutableStateOf(client?.phoneHome?.isNotBlank() == true) }
+    var showPhoneWork by remember(editingClientId) { mutableStateOf(client?.phoneWork?.isNotBlank() == true) }
+    var showPhoneOther by remember(editingClientId) { mutableStateOf(client?.phoneOther?.isNotBlank() == true) }
+    var showEmailPersonal by remember(editingClientId) { mutableStateOf(client?.email?.isNotBlank() == true) }
+    var showEmailWork by remember(editingClientId) { mutableStateOf(client?.emailWork?.isNotBlank() == true) }
+    var showBirthday by remember(editingClientId) { mutableStateOf(client?.birthday?.isNotBlank() == true) }
     var showBirthdayPicker by remember { mutableStateOf(false) }
-    var showAddressHome by remember { mutableStateOf(false) }
-    var showAddressWork by remember { mutableStateOf(false) }
-    var showDisplayName by remember { mutableStateOf(false) }
-    var showMiddleName by remember { mutableStateOf(false) }
-    var showNickname by remember { mutableStateOf(false) }
-    var showJobTitle by remember { mutableStateOf(false) }
-    var showWebsite by remember { mutableStateOf(false) }
-    var showSocial by remember { mutableStateOf(false) }
+    var showAddressHome by remember(editingClientId) { mutableStateOf(client?.address?.isNotBlank() == true) }
+    var showAddressWork by remember(editingClientId) { mutableStateOf(client?.addressWork?.isNotBlank() == true) }
+    var showDisplayName by remember(editingClientId) { mutableStateOf(showInitialDisplayName) }
+    var showMiddleName by remember(editingClientId) { mutableStateOf(client?.middleName?.isNotBlank() == true) }
+    var showNickname by remember(editingClientId) { mutableStateOf(client?.nickname?.isNotBlank() == true) }
+    var showJobTitle by remember(editingClientId) { mutableStateOf(client?.jobTitle?.isNotBlank() == true) }
+    var showWebsite by remember(editingClientId) { mutableStateOf(client?.website?.isNotBlank() == true) }
+    var showSocial by remember(editingClientId) { mutableStateOf(client?.social?.isNotBlank() == true) }
     var showOtherPicker by remember { mutableStateOf(false) }
     fun currentDraft() = ClientDraft(
         name = name,
@@ -5337,12 +6353,21 @@ private fun ClientFormScreen(viewModel: AppViewModel, onBack: () -> Unit) {
         }
     }
     fun saveClient() {
-        if (currentDraft().displayName().isBlank()) {
-            viewModel.addClient(context, currentDraft(), syncContact = false)
+        val draft = currentDraft()
+        if (draft.displayName().isBlank()) {
+            if (client == null) {
+                viewModel.addClient(context, draft, syncContact = false)
+            } else {
+                viewModel.updateClient(context, client, draft)
+            }
             return
         }
-        viewModel.addClient(context, currentDraft(), syncContact = false)
-        clearForm()
+        if (client == null) {
+            viewModel.addClient(context, draft, syncContact = false)
+            clearForm()
+        } else {
+            viewModel.updateClient(context, client, draft)
+        }
         onBack()
     }
     fun addNextPhoneField() {
@@ -5428,7 +6453,7 @@ private fun ClientFormScreen(viewModel: AppViewModel, onBack: () -> Unit) {
                         Icon(Icons.Filled.Close, contentDescription = "Закрыть")
                     }
                 },
-                title = { Text("Создать\nклиента") },
+                title = { Text(if (client == null) "Создать\nклиента" else "Изменить\nклиента") },
                 actions = {
                     Button(
                         onClick = { saveClient() },
@@ -5787,6 +6812,94 @@ private fun AddContactDataButton(label: String, icon: ImageVector, onClick: () -
 }
 
 @Composable
+private fun ClientSectionHeader(
+    section: String
+) {
+    Text(
+        text = section,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .padding(top = 10.dp, bottom = 2.dp)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+}
+
+@Composable
+private fun ClientScrollHandle(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    modifier: Modifier = Modifier
+) {
+    val layoutInfo = listState.layoutInfo
+    val totalItems = layoutInfo.totalItemsCount
+    val visibleItems = layoutInfo.visibleItemsInfo.size
+    if (visibleItems == 0 || totalItems <= visibleItems) return
+
+    val firstVisibleIndex = layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: listState.firstVisibleItemIndex
+    val maxFirstVisible = (totalItems - visibleItems).coerceAtLeast(1)
+    val density = LocalDensity.current
+    val averageVisibleItemHeightPx = layoutInfo.visibleItemsInfo
+        .map { it.size }
+        .takeIf { it.isNotEmpty() }
+        ?.average()
+        ?.toFloat()
+        ?.coerceAtLeast(1f) ?: with(density) { 56.dp.toPx() }
+    val scrollFraction = (
+        (firstVisibleIndex + listState.firstVisibleItemScrollOffset / averageVisibleItemHeightPx) /
+            maxFirstVisible.toFloat()
+    ).coerceIn(0f, 1f)
+
+    BoxWithConstraints(
+        modifier = modifier
+            .width(48.dp)
+            .fillMaxHeight(0.72f)
+    ) {
+        val thumbHeight = 48.dp
+        val rawThumbTravel = maxHeight - thumbHeight
+        val thumbTravel = if (rawThumbTravel > 1.dp) rawThumbTravel else 1.dp
+        val thumbOffset = (thumbTravel.value * scrollFraction).dp
+        val thumbTravelPx = with(density) { thumbTravel.toPx().coerceAtLeast(1f) }
+        val dragToScrollMultiplier = (
+            (totalItems - visibleItems).coerceAtLeast(1) * averageVisibleItemHeightPx / thumbTravelPx
+        ).coerceIn(2f, 28f)
+        val currentDragToScrollMultiplier by rememberUpdatedState(dragToScrollMultiplier)
+        val dragState = rememberDraggableState { delta ->
+            listState.dispatchRawDelta(delta * currentDragToScrollMultiplier)
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .draggable(
+                    state = dragState,
+                    orientation = Orientation.Vertical,
+                    startDragImmediately = true
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 10.dp)
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(y = thumbOffset)
+                    .padding(end = 8.dp)
+                    .width(7.dp)
+                    .height(thumbHeight)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.78f))
+            )
+        }
+    }
+}
+
+@Composable
 private fun ClientListRow(client: ClientEntity, onClick: () -> Unit) {
     Surface(
         modifier = Modifier
@@ -5824,6 +6937,7 @@ private fun ClientDetailScreen(
     appointments: List<AppointmentRow>,
     financeTransactions: List<FinanceTransactionEntity>,
     onBack: () -> Unit,
+    onEditClient: (() -> Unit)? = null,
     onOpenAppointment: (Long) -> Unit,
     onCreateAppointment: (Long) -> Unit
 ) {
@@ -5885,9 +6999,17 @@ private fun ClientDetailScreen(
                             Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                         }
                     },
+                    actions = {
+                        if (onEditClient != null) {
+                            IconButton(onClick = onEditClient) {
+                                Icon(Icons.Filled.Edit, contentDescription = "Изменить клиента")
+                            }
+                        }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface,
-                        navigationIconContentColor = MaterialTheme.colorScheme.onSurface
+                        navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                        actionIconContentColor = MaterialTheme.colorScheme.onSurface
                     )
                 )
             }
@@ -6251,15 +7373,72 @@ private fun ClientFinanceSection(
     val totals = remember(client.id, appointments, transactions) {
         clientFinanceTotals(client.id, appointments, transactions)
     }
-    FinanceOverviewCard(
-        title = "Финансы клиента",
-        summary = FinanceSummary(
-            accruedCents = totals.accruedCents,
-            paidCents = totals.paidCents,
-            debtCents = totals.debtCents,
-            expenseCents = totals.expenseCents
+    ContactDetailGroup {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Icon(Icons.Filled.Payments, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Финансы", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        Column(
+            modifier = Modifier.padding(start = 58.dp, end = 18.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.fillMaxWidth()) {
+                ClientFinanceMetric("Начислено", totals.accruedCents, Modifier.weight(1f))
+                ClientFinanceMetric("Оплачено", totals.paidCents, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.fillMaxWidth()) {
+                ClientFinanceMetric("Долг", totals.debtCents, Modifier.weight(1f), emphasize = totals.debtCents > 0)
+                ClientFinanceMetric("Расходы", totals.expenseCents, Modifier.weight(1f))
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Итого",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        formatMoney(totals.totalCents),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClientFinanceMetric(
+    label: String,
+    amountCents: Long,
+    modifier: Modifier = Modifier,
+    emphasize: Boolean = false
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            formatMoney(amountCents),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = if (emphasize) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
         )
-    )
+    }
 }
 
 @Composable
@@ -6348,67 +7527,188 @@ private fun ContactImportScreen(viewModel: AppViewModel, onBack: () -> Unit) {
         if (hasPermission) viewModel.loadContacts(context)
     }
 
-    val contacts = viewModel.contacts.filter {
-        query.isBlank() ||
-            it.name.contains(query, true) ||
-            it.phone.contains(query, true) ||
-            it.email.contains(query, true) ||
-            it.company.contains(query, true)
+    val allContacts = viewModel.contacts
+    val contacts by remember(allContacts, query) {
+        derivedStateOf {
+            allContacts.filter {
+                query.isBlank() ||
+                    it.name.contains(query, true) ||
+                    it.phone.contains(query, true) ||
+                    it.email.contains(query, true) ||
+                    it.company.contains(query, true)
+            }
+        }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("Назад") }
-            Text("Контакты телефона", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp)
+    ) {
+        Spacer(Modifier.height(12.dp))
         if (!hasPermission) {
-            Text("Нужен доступ к контактам, чтобы связать клиентов с телефонной книгой.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = { permissionLauncher.launch(Manifest.permission.READ_CONTACTS) }) {
-                Text("Разрешить контакты")
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "Разреши доступ к контактам, чтобы выбрать людей из телефонной книги и добавить их как клиентов.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = { permissionLauncher.launch(Manifest.permission.READ_CONTACTS) },
+                        shape = RoundedCornerShape(24.dp)
+                    ) {
+                        Text("Разрешить контакты")
+                    }
+                }
             }
             return
         }
-        OutlinedTextField(query, { query = it }, label = { Text("Поиск") }, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    viewModel.importContacts(viewModel.contacts.filter { selected.contains(it.key) })
-                    selected.clear()
-                    onBack()
-                }
+        RoundedSearchField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = "Поиск",
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(10.dp))
+        if (selected.isEmpty()) {
+            Text(
+                text = if (contacts.isEmpty()) {
+                    if (query.isBlank()) "Контакты загружаются или не найдены" else "Ничего не найдено"
+                } else {
+                    "Выбери контакты для импорта"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+            )
+        } else {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
             ) {
-                Text("Добавить как клиентов (${selected.size})")
-            }
-            OutlinedButton(onClick = { selected.clear() }) { Text("Снять выбор") }
-        }
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(contacts, key = { it.key }) { contact ->
-                val checked = selected.contains(contact.key)
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            if (checked) selected.remove(contact.key) else selected.add(contact.key)
-                        }
-                        .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(8.dp))
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Checkbox(checked = checked, onCheckedChange = {
-                        if (it) selected.add(contact.key) else selected.remove(contact.key)
-                    })
-                    ContactAvatar(name = contact.name, photoUri = contact.photoUri, modifier = Modifier.padding(end = 10.dp))
-                    Column {
-                        Text(contact.name, fontWeight = FontWeight.SemiBold)
-                        val details = listOf(contact.phone, contact.email, contact.company)
-                            .filter { it.isNotBlank() }
-                            .joinToString(" / ")
-                        Text(details.ifBlank { "Без телефона и email" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "${selected.size} выбрано",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { selected.clear() }) {
+                        Text("Снять")
+                    }
+                    Button(
+                        onClick = {
+                            viewModel.importContacts(allContacts.filter { selected.contains(it.key) })
+                            selected.clear()
+                            onBack()
+                        },
+                        shape = RoundedCornerShape(22.dp)
+                    ) {
+                        Text("Добавить")
                     }
                 }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(contacts, key = { it.key }) { contact ->
+                val checked = selected.contains(contact.key)
+                ContactImportRow(
+                    contact = contact,
+                    checked = checked,
+                    onToggle = {
+                        if (checked) {
+                            selected.remove(contact.key)
+                        } else {
+                            selected.add(contact.key)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContactImportRow(
+    contact: ContactCandidate,
+    checked: Boolean,
+    onToggle: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle),
+        shape = RoundedCornerShape(18.dp),
+        color = if (checked) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = if (checked) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)) else null
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            ContactAvatar(name = contact.name, photoUri = contact.photoUri)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    contact.name.ifBlank { "Без имени" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val details = listOf(contact.phone, contact.email, contact.company)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" / ")
+                Text(
+                    details.ifBlank { "Без телефона и email" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            ContactImportSelectionMark(checked = checked)
+        }
+    }
+}
+
+@Composable
+private fun ContactImportSelectionMark(checked: Boolean) {
+    Surface(
+        modifier = Modifier.size(30.dp),
+        shape = CircleShape,
+        color = if (checked) MaterialTheme.colorScheme.primary else Color.Transparent,
+        border = BorderStroke(
+            width = 1.5.dp,
+            color = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+        )
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            if (checked) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }
@@ -6421,6 +7721,7 @@ private fun AppointmentsScreen(
     clients: List<ClientEntity>,
     appointments: List<AppointmentRow>,
     appointmentIndex: AppointmentIndex,
+    dayOffIndex: DayOffIndex,
     services: List<ServiceEntity>,
     financeTransactions: List<FinanceTransactionEntity>,
     requestedAppointmentId: Long?,
@@ -6446,6 +7747,11 @@ private fun AppointmentsScreen(
     var monthPreviewSwipeAnimationToken by remember { mutableStateOf(0) }
 
     var showCreateSheet by remember { mutableStateOf(false) }
+    var showAddAppointmentMenu by remember { mutableStateOf(false) }
+    var showDayOffSheet by remember { mutableStateOf(false) }
+    var showDayOffRangePicker by remember { mutableStateOf(false) }
+    var showDayOffStartTimePicker by remember { mutableStateOf(false) }
+    var showDayOffEndTimePicker by remember { mutableStateOf(false) }
     var showClientPicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
     var showCalendarDatePicker by remember { mutableStateOf(false) }
@@ -6453,18 +7759,29 @@ private fun AppointmentsScreen(
     var showTimePicker by remember { mutableStateOf(false) }
     var serviceCreatorTargetId by remember { mutableStateOf<Int?>(null) }
     var selectedAppointmentId by remember { mutableStateOf<Long?>(null) }
+    var selectedDayOffId by remember { mutableStateOf<Long?>(null) }
     var selectedClientProfileId by remember { mutableStateOf<Long?>(null) }
     var monthPreviewDate by remember { mutableStateOf<LocalDate?>(null) }
     var monthPreviewAppointmentId by remember { mutableStateOf<Long?>(null) }
     var calendarReturnView by remember { mutableStateOf<AppointmentCalendarView?>(null) }
     var editingAppointmentId by remember { mutableStateOf<Long?>(null) }
+    var editingDayOffId by remember { mutableStateOf<Long?>(null) }
     var movingAppointmentId by remember { mutableStateOf<Long?>(null) }
     var appointmentConflict by remember { mutableStateOf<AppointmentConflictAction?>(null) }
+    var dayOffAppointmentConflict by remember { mutableStateOf<DayOffAppointmentConflict?>(null) }
+    var dayOffMergeConflict by remember { mutableStateOf<DayOffMergeConflict?>(null) }
+    var dayOffMoveQueue by remember { mutableStateOf<List<Long>>(emptyList()) }
 
     var selectedClientId by remember(clients) { mutableStateOf(0L) }
     var appointmentDate by remember { mutableStateOf(LocalDate.now()) }
     var appointmentTime by remember { mutableStateOf("10:00") }
     var notes by remember { mutableStateOf("") }
+    var dayOffTitle by remember { mutableStateOf("Выходной") }
+    var dayOffDate by remember { mutableStateOf(LocalDate.now()) }
+    var dayOffEndDate by remember { mutableStateOf(LocalDate.now()) }
+    var dayOffStartTime by remember { mutableStateOf("10:00") }
+    var dayOffEndTime by remember { mutableStateOf("18:00") }
+    var dayOffNotes by remember { mutableStateOf("") }
     var clientSearch by remember { mutableStateOf("") }
     var serviceDraftKey by remember { mutableStateOf(1) }
     val serviceDrafts = remember { mutableStateListOf(AppointmentServiceDraft(localId = 0)) }
@@ -6500,6 +7817,140 @@ private fun AppointmentsScreen(
         showClientPicker = false
     }
 
+    fun resetDayOffDraft() {
+        editingDayOffId = null
+        dayOffTitle = "Выходной"
+        dayOffDate = selectedDate
+        dayOffEndDate = selectedDate
+        dayOffStartTime = "10:00"
+        dayOffEndTime = "18:00"
+        dayOffNotes = ""
+    }
+
+    fun openNewDayOffAt(date: LocalDate, startTime: LocalTime = LocalTime.of(10, 0)) {
+        resetDayOffDraft()
+        selectedAppointmentId = null
+        selectedDayOffId = null
+        selectedClientProfileId = null
+        selectedDate = date
+        val endTime = if (startTime.hour >= 23) LocalTime.of(23, 59) else startTime.plusHours(1)
+        dayOffDate = date
+        dayOffEndDate = date
+        dayOffStartTime = "%02d:%02d".format(Locale.US, startTime.hour, startTime.minute)
+        dayOffEndTime = "%02d:%02d".format(Locale.US, endTime.hour, endTime.minute)
+        showDayOffSheet = true
+        onEditorOpenChange(true)
+    }
+
+    fun openDayOffEditor(dayOff: DayOffEntity) {
+        val start = parseAppointmentDateTime(dayOff.startAt)
+        val end = parseAppointmentDateTime(dayOff.endAt)
+        editingDayOffId = dayOff.id
+        selectedDayOffId = null
+        selectedAppointmentId = null
+        dayOffTitle = dayOff.title.ifBlank { "Выходной" }
+        dayOffDate = start?.toLocalDate() ?: selectedDate
+        dayOffEndDate = end?.toLocalDate() ?: start?.toLocalDate() ?: selectedDate
+        dayOffStartTime = start?.toLocalTime()?.let { "%02d:%02d".format(Locale.US, it.hour, it.minute) } ?: "10:00"
+        dayOffEndTime = end?.toLocalTime()?.let { "%02d:%02d".format(Locale.US, it.hour, it.minute) } ?: "18:00"
+        dayOffNotes = dayOff.notes
+        showDayOffSheet = true
+        onEditorOpenChange(true)
+    }
+
+    fun closeDayOffEditor() {
+        showDayOffSheet = false
+        showDayOffRangePicker = false
+        showDayOffStartTimePicker = false
+        showDayOffEndTimePicker = false
+        dayOffAppointmentConflict = null
+        dayOffMergeConflict = null
+        dayOffMoveQueue = emptyList()
+        resetDayOffDraft()
+        onEditorOpenChange(false)
+    }
+
+    fun applyDayOffDraftRange(startAt: String, endAt: String) {
+        val start = parseAppointmentDateTime(startAt) ?: return
+        val end = parseAppointmentDateTime(endAt) ?: return
+        dayOffDate = start.toLocalDate()
+        dayOffEndDate = end.toLocalDate()
+        dayOffStartTime = "%02d:%02d".format(Locale.US, start.hour, start.minute)
+        dayOffEndTime = "%02d:%02d".format(Locale.US, end.hour, end.minute)
+    }
+
+    fun saveDayOffDraft(
+        forcedStartAt: String? = null,
+        forcedEndAt: String? = null,
+        allowMerge: Boolean = false
+    ) {
+        val startAt = forcedStartAt ?: formatAppointmentLocalDateTime(dayOffDate, dayOffStartTime)
+        val endAt = forcedEndAt ?: formatAppointmentLocalDateTime(dayOffEndDate, dayOffEndTime)
+        if (!dayOffRangeIsValid(startAt, endAt)) {
+            viewModel.showMessage("Укажи корректное время выходного")
+            return
+        }
+        applyDayOffDraftRange(startAt, endAt)
+        val appointmentConflicts = findAppointmentConflicts(
+            appointments = appointments,
+            startAt = startAt,
+            endAt = endAt
+        )
+        if (appointmentConflicts.isNotEmpty()) {
+            dayOffAppointmentConflict = DayOffAppointmentConflict(
+                startAt = startAt,
+                endAt = endAt,
+                appointmentIds = appointmentConflicts.map { it.id }
+            )
+            return
+        }
+        val overlapAnalysis = analyzeDayOffOverlaps(
+            dayOffs = dayOffIndex.dayOffs,
+            startAt = startAt,
+            endAt = endAt,
+            excludeDayOffId = editingDayOffId
+        )
+        if (overlapAnalysis.mergeRequired.isNotEmpty() && !allowMerge) {
+            val mergeRange = mergedDayOffRange(startAt, endAt, overlapAnalysis.replacementIds.mapNotNull { dayOffIndex.byId[it] })
+            dayOffMergeConflict = DayOffMergeConflict(
+                startAt = startAt,
+                endAt = endAt,
+                dayOffIds = overlapAnalysis.replacementIds,
+                mergedStartAt = mergeRange.first,
+                mergedEndAt = mergeRange.second
+            )
+            return
+        }
+        val replaceDayOffIds = if (allowMerge) {
+            overlapAnalysis.replacementIds
+        } else {
+            overlapAnalysis.covered.map { it.id }
+        }
+        val editId = editingDayOffId
+        if (editId == null) {
+            viewModel.addDayOff(
+                context = context,
+                title = dayOffTitle,
+                startAt = startAt,
+                endAt = endAt,
+                notes = dayOffNotes,
+                replaceDayOffIds = replaceDayOffIds
+            )
+        } else {
+            viewModel.updateDayOff(
+                context = context,
+                dayOffId = editId,
+                title = dayOffTitle,
+                startAt = startAt,
+                endAt = endAt,
+                notes = dayOffNotes,
+                replaceDayOffIds = replaceDayOffIds
+            )
+        }
+        selectedDate = dayOffDate
+        closeDayOffEditor()
+    }
+
     fun saveDraft(skipConflictCheck: Boolean = false): Long? {
         val startAt = formatAppointmentLocalDateTime(appointmentDate, appointmentTime)
         val editId = editingAppointmentId
@@ -6508,6 +7959,15 @@ private fun AppointmentsScreen(
             .sumOf { it.durationMinutes.coerceAtLeast(15) }
             .coerceAtLeast(15)
         if (!skipConflictCheck) {
+            val dayOffConflict = findDayOffConflict(
+                dayOffs = dayOffIndex.dayOffs,
+                startAt = startAt,
+                durationMinutes = totalDuration
+            )
+            if (dayOffConflict != null) {
+                viewModel.showMessage("В это время выходной: ${dayOffConflict.title.ifBlank { "Выходной" }}")
+                return null
+            }
             val conflict = findAppointmentConflict(
                 appointments = appointments,
                 startAt = startAt,
@@ -6657,6 +8117,9 @@ private fun AppointmentsScreen(
     val selectedAppointment = remember(selectedAppointmentId, appointmentIndex) {
         selectedAppointmentId?.let { id -> appointmentIndex.byId[id] }
     }
+    val selectedDayOff = remember(selectedDayOffId, dayOffIndex) {
+        selectedDayOffId?.let { id -> dayOffIndex.byId[id] }
+    }
     val selectedClientProfile = remember(selectedClientProfileId, clients) {
         selectedClientProfileId?.let { id -> clients.firstOrNull { it.id == id } }
     }
@@ -6718,8 +8181,11 @@ private fun AppointmentsScreen(
 
     BackHandler(
         enabled = showCreateSheet ||
+            showAddAppointmentMenu ||
+            showDayOffSheet ||
             selectedClientProfileId != null ||
             selectedAppointmentId != null ||
+            selectedDayOffId != null ||
             monthPreviewDate != null ||
             calendarReturnView != null
     ) {
@@ -6727,10 +8193,17 @@ private fun AppointmentsScreen(
             closeMonthDayPreview()
         } else if (selectedClientProfileId != null) {
             selectedClientProfileId = null
+        } else if (showAddAppointmentMenu) {
+            showAddAppointmentMenu = false
+        } else if (showDayOffSheet) {
+            closeDayOffEditor()
         } else if (showCreateSheet) {
             requestCloseEditor()
         } else if (selectedAppointmentId != null) {
             closeAppointmentDetails()
+        } else if (selectedDayOffId != null) {
+            selectedDayOffId = null
+            onEditorOpenChange(false)
         } else if (calendarReturnView != null) {
             calendarView = calendarReturnView ?: calendarView
             calendarReturnView = null
@@ -6750,63 +8223,73 @@ private fun AppointmentsScreen(
                 onDatePickerClick = { showCalendarDatePicker = true }
             )
 
-            if (clients.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    EmptyText("Сначала добавь клиента.")
-                }
-            } else {
-                when (calendarView) {
-                    AppointmentCalendarView.Day,
-                    AppointmentCalendarView.ThreeDays,
-                    AppointmentCalendarView.Week -> AppointmentTimelineView(
-                        calendarView = calendarView,
-                        selectedDate = selectedDate,
-                        appointmentIndex = appointmentIndex,
-                        hasCalendarPermissions = hasCalendarPermissions,
-                        financeSummary = periodFinanceSummary,
-                        financeTitle = financeSummaryTitle(calendarView),
-                        swipeAnimationDirection = fullSwipeAnimationDirection,
-                        swipeAnimationToken = fullSwipeAnimationToken,
-                        onAppointmentClick = { openAppointmentDetails(it) },
-                        onEmptySlotClick = { date, time -> openNewAppointmentAt(date, time) },
-                        onPeriodSwipe = { direction ->
-                            markCalendarSwipe(direction)
-                            selectedDate = selectedDate.shiftCalendarPeriod(calendarView, direction)
+            when (calendarView) {
+                AppointmentCalendarView.Day,
+                AppointmentCalendarView.ThreeDays,
+                AppointmentCalendarView.Week -> AppointmentTimelineView(
+                    calendarView = calendarView,
+                    selectedDate = selectedDate,
+                    appointmentIndex = appointmentIndex,
+                    dayOffIndex = dayOffIndex,
+                    hasCalendarPermissions = hasCalendarPermissions,
+                    financeSummary = periodFinanceSummary,
+                    financeTitle = financeSummaryTitle(calendarView),
+                    swipeAnimationDirection = fullSwipeAnimationDirection,
+                    swipeAnimationToken = fullSwipeAnimationToken,
+                    onAppointmentClick = { openAppointmentDetails(it) },
+                    onDayOffClick = {
+                        selectedDayOffId = it.id
+                        onEditorOpenChange(true)
+                    },
+                    onEmptySlotClick = { date, time ->
+                        if (clients.isEmpty()) {
+                            viewModel.showMessage("Сначала добавь клиента")
+                        } else {
+                            openNewAppointmentAt(date, time)
                         }
-                    )
-                    AppointmentCalendarView.Month -> AppointmentMonthView(
-                        selectedDate = selectedDate,
-                        appointmentIndex = appointmentIndex,
-                        financeSummary = periodFinanceSummary,
-                        fullSwipeAnimationDirection = fullSwipeAnimationDirection,
-                        fullSwipeAnimationToken = fullSwipeAnimationToken,
-                        agendaSwipeAnimationDirection = agendaSwipeAnimationDirection,
-                        agendaSwipeAnimationToken = agendaSwipeAnimationToken,
-                        onExpandedAppointmentClick = { openMonthDayPreview(it) },
-                        onCollapsedAppointmentClick = { openAppointmentDetails(it) },
-                        onExpandedDayClick = {
-                            openDayFromMonth(it)
-                        },
-                        onCollapsedDayClick = {
-                            selectedDate = it
-                        },
-                        onMonthSwipe = { direction ->
-                            markCalendarSwipe(direction)
-                            selectedDate = selectedDate.plusMonths(direction.toLong())
-                        },
-                        onWeekSwipe = { direction ->
-                            markCalendarSwipe(direction)
-                            selectedDate = selectedDate.startOfWeek().plusWeeks(direction.toLong())
-                        },
-                        onAgendaDaySwipe = { direction, animateFull ->
-                            markCalendarSwipe(
-                                direction = direction,
-                                target = if (animateFull) SwipeAnimationTarget.Full else SwipeAnimationTarget.Agenda
-                            )
-                            selectedDate = selectedDate.plusDays(direction.toLong())
-                        }
-                    )
-                }
+                    },
+                    onPeriodSwipe = { direction ->
+                        markCalendarSwipe(direction)
+                        selectedDate = selectedDate.shiftCalendarPeriod(calendarView, direction)
+                    }
+                )
+                AppointmentCalendarView.Month -> AppointmentMonthView(
+                    selectedDate = selectedDate,
+                    appointmentIndex = appointmentIndex,
+                    dayOffIndex = dayOffIndex,
+                    financeSummary = periodFinanceSummary,
+                    fullSwipeAnimationDirection = fullSwipeAnimationDirection,
+                    fullSwipeAnimationToken = fullSwipeAnimationToken,
+                    agendaSwipeAnimationDirection = agendaSwipeAnimationDirection,
+                    agendaSwipeAnimationToken = agendaSwipeAnimationToken,
+                    onExpandedAppointmentClick = { openMonthDayPreview(it) },
+                    onCollapsedAppointmentClick = { openAppointmentDetails(it) },
+                    onDayOffClick = {
+                        selectedDayOffId = it.id
+                        onEditorOpenChange(true)
+                    },
+                    onExpandedDayClick = {
+                        openDayFromMonth(it)
+                    },
+                    onCollapsedDayClick = {
+                        selectedDate = it
+                    },
+                    onMonthSwipe = { direction ->
+                        markCalendarSwipe(direction)
+                        selectedDate = selectedDate.plusMonths(direction.toLong())
+                    },
+                    onWeekSwipe = { direction ->
+                        markCalendarSwipe(direction)
+                        selectedDate = selectedDate.startOfWeek().plusWeeks(direction.toLong())
+                    },
+                    onAgendaDaySwipe = { direction, animateFull ->
+                        markCalendarSwipe(
+                            direction = direction,
+                            target = if (animateFull) SwipeAnimationTarget.Full else SwipeAnimationTarget.Agenda
+                        )
+                        selectedDate = selectedDate.plusDays(direction.toLong())
+                    }
+                )
             }
         }
 
@@ -6829,6 +8312,7 @@ private fun AppointmentsScreen(
             AppointmentMonthDaySheet(
                 date = previewDate,
                 dayAppointments = appointmentIndex.parsedByDate[previewDate].orEmpty(),
+                dayOffs = dayOffIndex.parsedByDate[previewDate].orEmpty(),
                 selectedAppointmentId = monthPreviewAppointmentId,
                 hasCalendarPermissions = hasCalendarPermissions,
                 financeSummary = previewFinanceSummary,
@@ -6839,6 +8323,11 @@ private fun AppointmentsScreen(
                     closeMonthDayPreview()
                     openAppointmentDetails(appointment)
                 },
+                onDayOffClick = { dayOff ->
+                    closeMonthDayPreview()
+                    selectedDayOffId = dayOff.id
+                    onEditorOpenChange(true)
+                },
                 onDateSwipe = { direction ->
                     markMonthPreviewSwipe(direction)
                     val nextDate = previewDate.plusDays(direction.toLong())
@@ -6848,7 +8337,11 @@ private fun AppointmentsScreen(
                 },
                 onCreateAppointment = { date ->
                     closeMonthDayPreview()
-                    openNewAppointmentAt(date)
+                    if (clients.isEmpty()) {
+                        viewModel.showMessage("Сначала добавь клиента")
+                    } else {
+                        openNewAppointmentAt(date)
+                    }
                 }
             )
         }
@@ -6883,6 +8376,30 @@ private fun AppointmentsScreen(
             }
         }
 
+        selectedDayOff?.let { dayOff ->
+            if (!showDayOffSheet) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    DayOffDetailScreen(
+                        dayOff = dayOff,
+                        hasCalendarPermissions = hasCalendarPermissions,
+                        onBack = {
+                            selectedDayOffId = null
+                            onEditorOpenChange(false)
+                        },
+                        onEdit = { openDayOffEditor(dayOff) },
+                        onDelete = {
+                            viewModel.deleteDayOff(context, dayOff.id)
+                            selectedDayOffId = null
+                            onEditorOpenChange(false)
+                        }
+                    )
+                }
+            }
+        }
+
         selectedClientProfile?.let { client ->
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -6905,14 +8422,58 @@ private fun AppointmentsScreen(
             }
         }
 
-        if (clients.isNotEmpty() && selectedAppointment == null && !showCreateSheet) {
-            FloatingActionButton(
-                onClick = { openNewAppointmentAt(selectedDate) },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(20.dp)
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Создать запись")
+        if (selectedAppointment == null && selectedDayOff == null && !showCreateSheet && !showDayOffSheet) {
+            if (showAddAppointmentMenu) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.42f))
+                        .clickable { showAddAppointmentMenu = false }
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 20.dp, bottom = 20.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ClientAddMenuAction(
+                        icon = Icons.Filled.Event,
+                        label = "Запись",
+                        onClick = {
+                            showAddAppointmentMenu = false
+                            if (clients.isEmpty()) {
+                                viewModel.showMessage("Сначала добавь клиента")
+                            } else {
+                                openNewAppointmentAt(selectedDate)
+                            }
+                        }
+                    )
+                    ClientAddMenuAction(
+                        icon = Icons.Filled.AccessTime,
+                        label = "Выходной",
+                        onClick = {
+                            showAddAppointmentMenu = false
+                            openNewDayOffAt(selectedDate)
+                        }
+                    )
+                    FloatingActionButton(
+                        onClick = { showAddAppointmentMenu = false },
+                        shape = CircleShape,
+                        modifier = Modifier.size(64.dp)
+                    ) {
+                        Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                    }
+                }
+            } else {
+                FloatingActionButton(
+                    onClick = { showAddAppointmentMenu = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(20.dp)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Создать")
+                }
             }
         }
 
@@ -6972,6 +8533,34 @@ private fun AppointmentsScreen(
                 }
             }
         }
+
+        if (showDayOffSheet) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                DayOffEditorContent(
+                    title = if (editingDayOffId == null) "Новый\nвыходной" else "Изменить\nвыходной",
+                    dayOffTitle = dayOffTitle,
+                    startDate = dayOffDate,
+                    endDate = dayOffEndDate,
+                    startTime = dayOffStartTime,
+                    endTime = dayOffEndTime,
+                    notes = dayOffNotes,
+                    canSave = dayOffRangeIsValid(
+                        formatAppointmentLocalDateTime(dayOffDate, dayOffStartTime),
+                        formatAppointmentLocalDateTime(dayOffEndDate, dayOffEndTime)
+                    ),
+                    onClose = { closeDayOffEditor() },
+                    onTitleChange = { dayOffTitle = it },
+                    onOpenRangePicker = { showDayOffRangePicker = true },
+                    onOpenStartTimePicker = { showDayOffStartTimePicker = true },
+                    onOpenEndTimePicker = { showDayOffEndTimePicker = true },
+                    onNotesChange = { dayOffNotes = it },
+                    onSave = { saveDayOffDraft() }
+                )
+            }
+        }
     }
 
     if (showAppointmentSearch) {
@@ -6994,17 +8583,38 @@ private fun AppointmentsScreen(
             onDismiss = { movingAppointmentId = null },
             onSave = { date, time ->
                 val startAt = formatAppointmentLocalDateTime(date, time)
+                val movingDuration = appointment.durationMinutes.coerceAtLeast(15)
+                val draftDayOffStartAt = formatAppointmentLocalDateTime(dayOffDate, dayOffStartTime)
+                val draftDayOffEndAt = formatAppointmentLocalDateTime(dayOffEndDate, dayOffEndTime)
+                if (
+                    showDayOffSheet &&
+                    appointment.id in dayOffMoveQueue &&
+                    dayOffRangeIsValid(draftDayOffStartAt, draftDayOffEndAt) &&
+                    appointmentRangeOverlapsDayOff(startAt, movingDuration, draftDayOffStartAt, draftDayOffEndAt)
+                ) {
+                    viewModel.showMessage("Новая дата все еще попадает в этот выходной")
+                    return@AppointmentMoveSheet
+                }
+                val dayOffConflict = findDayOffConflict(
+                    dayOffs = dayOffIndex.dayOffs,
+                    startAt = startAt,
+                    durationMinutes = movingDuration
+                )
+                if (dayOffConflict != null) {
+                    viewModel.showMessage("В это время выходной: ${dayOffConflict.title.ifBlank { "Выходной" }}")
+                    return@AppointmentMoveSheet
+                }
                 val conflict = findAppointmentConflict(
                     appointments = appointments,
                     startAt = startAt,
-                    durationMinutes = appointment.durationMinutes.coerceAtLeast(15),
+                    durationMinutes = movingDuration,
                     excludeAppointmentId = appointment.id
                 )
                 if (conflict != null) {
                     appointmentConflict = AppointmentConflictAction.MoveAndMoveConflicting(
                         movingAppointmentId = appointment.id,
                         movingStartAt = startAt,
-                        movingDurationMinutes = appointment.durationMinutes.coerceAtLeast(15),
+                        movingDurationMinutes = movingDuration,
                         conflictingAppointmentId = conflict.id,
                         movingWasCancelled = appointmentIsCancelled(appointment)
                     )
@@ -7017,7 +8627,12 @@ private fun AppointmentsScreen(
                 }
                 selectedDate = date
                 calendarView = AppointmentCalendarView.Day
-                movingAppointmentId = null
+                val remainingMoveQueue = dayOffMoveQueue.filter { it != appointment.id }
+                dayOffMoveQueue = remainingMoveQueue
+                movingAppointmentId = remainingMoveQueue.firstOrNull()
+                if (remainingMoveQueue.isNotEmpty()) {
+                    viewModel.showMessage("Осталось перенести записей: ${remainingMoveQueue.size}")
+                }
             }
         )
     }
@@ -7048,6 +8663,42 @@ private fun AppointmentsScreen(
                         movingAppointmentId = conflict.conflictingAppointmentId
                     }
                 }
+            }
+        )
+    }
+
+    dayOffAppointmentConflict?.let { conflict ->
+        val conflictAppointments = conflict.appointmentIds.mapNotNull { appointmentIndex.byId[it] }
+        DayOffAppointmentConflictDialog(
+            appointments = conflictAppointments,
+            startAt = conflict.startAt,
+            endAt = conflict.endAt,
+            onKeepEditing = { dayOffAppointmentConflict = null },
+            onMoveAppointments = {
+                dayOffAppointmentConflict = null
+                dayOffMoveQueue = conflictAppointments.map { it.id }
+                movingAppointmentId = conflictAppointments.firstOrNull()?.id
+            }
+        )
+    }
+
+    dayOffMergeConflict?.let { conflict ->
+        val conflictDayOffs = conflict.dayOffIds.mapNotNull { dayOffIndex.byId[it] }
+        DayOffMergeConflictDialog(
+            dayOffs = conflictDayOffs,
+            startAt = conflict.startAt,
+            endAt = conflict.endAt,
+            mergedStartAt = conflict.mergedStartAt,
+            mergedEndAt = conflict.mergedEndAt,
+            onKeepEditing = { dayOffMergeConflict = null },
+            onMerge = {
+                dayOffMergeConflict = null
+                applyDayOffDraftRange(conflict.mergedStartAt, conflict.mergedEndAt)
+                saveDayOffDraft(
+                    forcedStartAt = conflict.mergedStartAt,
+                    forcedEndAt = conflict.mergedEndAt,
+                    allowMerge = true
+                )
             }
         )
     }
@@ -7157,6 +8808,119 @@ private fun AppointmentsScreen(
                     onClick = {
                         appointmentTime = "%02d:%02d".format(Locale.US, timePickerState.hour, timePickerState.minute)
                         showTimePicker = false
+                    }
+                ) { Text("ОК") }
+            }
+        )
+    }
+
+    if (showDayOffRangePicker) {
+        val pickerState = rememberDateRangePickerState(
+            initialSelectedStartDateMillis = dayOffDate.toPickerMillis(),
+            initialSelectedEndDateMillis = dayOffEndDate.toPickerMillis()
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDayOffRangePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val startMillis = pickerState.selectedStartDateMillis
+                        val endMillis = pickerState.selectedEndDateMillis ?: startMillis
+                        if (startMillis != null && endMillis != null) {
+                            val pickedStart = pickerMillisToLocalDate(startMillis)
+                            val pickedEnd = pickerMillisToLocalDate(endMillis)
+                            dayOffDate = minOf(pickedStart, pickedEnd)
+                            dayOffEndDate = maxOf(pickedStart, pickedEnd)
+                        }
+                        showDayOffRangePicker = false
+                    }
+                ) { Text("ОК") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDayOffRangePicker = false }) { Text("Отмена") }
+            }
+        ) {
+            DateRangePicker(
+                state = pickerState,
+                title = {
+                    Text(
+                        "Период выходного",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp)
+                    )
+                },
+                headline = {
+                    Text(
+                        dayOffPeriodLabel(
+                            pickerState.selectedStartDateMillis?.let { pickerMillisToLocalDate(it) } ?: dayOffDate,
+                            pickerState.selectedEndDateMillis?.let { pickerMillisToLocalDate(it) }
+                                ?: pickerState.selectedStartDateMillis?.let { pickerMillisToLocalDate(it) }
+                                ?: dayOffEndDate
+                        ),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                    )
+                }
+            )
+        }
+    }
+
+    if (showDayOffStartTimePicker) {
+        val parsedTime = remember(dayOffStartTime) {
+            runCatching { LocalTime.parse(dayOffStartTime) }.getOrElse { LocalTime.of(10, 0) }
+        }
+        val timePickerState = rememberTimePickerState(
+            initialHour = parsedTime.hour,
+            initialMinute = parsedTime.minute,
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        AlertDialog(
+            onDismissRequest = { showDayOffStartTimePicker = false },
+            title = { Text("Начало выходного") },
+            text = {
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TimePicker(state = timePickerState)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDayOffStartTimePicker = false }) { Text("Отмена") }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dayOffStartTime = "%02d:%02d".format(Locale.US, timePickerState.hour, timePickerState.minute)
+                        showDayOffStartTimePicker = false
+                    }
+                ) { Text("ОК") }
+            }
+        )
+    }
+
+    if (showDayOffEndTimePicker) {
+        val parsedTime = remember(dayOffEndTime) {
+            runCatching { LocalTime.parse(dayOffEndTime) }.getOrElse { LocalTime.of(18, 0) }
+        }
+        val timePickerState = rememberTimePickerState(
+            initialHour = parsedTime.hour,
+            initialMinute = parsedTime.minute,
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        AlertDialog(
+            onDismissRequest = { showDayOffEndTimePicker = false },
+            title = { Text("Конец выходного") },
+            text = {
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TimePicker(state = timePickerState)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDayOffEndTimePicker = false }) { Text("Отмена") }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dayOffEndTime = "%02d:%02d".format(Locale.US, timePickerState.hour, timePickerState.minute)
+                        showDayOffEndTimePicker = false
                     }
                 ) { Text("ОК") }
             }
@@ -7276,12 +9040,10 @@ private fun AppointmentSearchSheet(
                     Icon(Icons.Filled.Close, contentDescription = "Закрыть")
                 }
             }
-            OutlinedTextField(
+            RoundedSearchField(
                 value = query,
                 onValueChange = { query = it },
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                placeholder = { Text("Клиент, услуга, заметка") },
-                singleLine = true,
+                placeholder = "Клиент, услуга, заметка",
                 modifier = Modifier.fillMaxWidth()
             )
             Text(
@@ -7375,12 +9137,14 @@ private fun AppointmentTimelineView(
     calendarView: AppointmentCalendarView,
     selectedDate: LocalDate,
     appointmentIndex: AppointmentIndex,
+    dayOffIndex: DayOffIndex,
     hasCalendarPermissions: Boolean,
     financeSummary: FinanceSummary,
     financeTitle: String,
     swipeAnimationDirection: Int,
     swipeAnimationToken: Int,
     onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onEmptySlotClick: (LocalDate, LocalTime) -> Unit,
     onPeriodSwipe: (Int) -> Unit
 ) {
@@ -7504,6 +9268,28 @@ private fun AppointmentTimelineView(
                                             .padding(horizontal = 4.dp, vertical = 2.dp)
                                     )
                                 }
+                            dayOffIndex.parsedByDate[date]
+                                .orEmpty()
+                                .forEach { parsedDayOff ->
+                                    val dayOff = parsedDayOff.dayOff
+                                    val startMinute = parsedDayOff.start.hour * 60 + parsedDayOff.start.minute
+                                    val durationMinutes = java.time.Duration.between(parsedDayOff.start, parsedDayOff.end)
+                                        .toMinutes()
+                                        .toInt()
+                                        .coerceAtLeast(15)
+                                    val visibleDuration = durationMinutes.coerceAtMost((24 * 60 - startMinute).coerceAtLeast(15))
+                                    val topOffset = hourHeight * (startMinute / 60f)
+                                    val cardHeight = (hourHeight * (visibleDuration / 60f)).coerceAtLeast(44.dp)
+                                    DayOffTimelineCard(
+                                        dayOff = dayOff,
+                                        onClick = onDayOffClick,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .offset(y = topOffset)
+                                            .height(cardHeight)
+                                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
                         }
                     }
                 }
@@ -7579,6 +9365,39 @@ private fun AppointmentTimelineCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun DayOffTimelineCard(
+    dayOff: DayOffEntity,
+    onClick: (DayOffEntity) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = dayOffContainerColor(),
+        contentColor = dayOffContentColor(),
+        shape = RoundedCornerShape(6.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable { onClick(dayOff) }
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
+            Text(
+                dayOff.title.ifBlank { "Выходной" },
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                dayOffTimeRange(dayOff),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -7726,6 +9545,7 @@ private fun FinanceOverviewMetric(
 private fun AppointmentMonthDaySheet(
     date: LocalDate,
     dayAppointments: List<ParsedAppointmentRow>,
+    dayOffs: List<ParsedDayOffRow>,
     selectedAppointmentId: Long?,
     hasCalendarPermissions: Boolean,
     financeSummary: FinanceSummary,
@@ -7733,6 +9553,7 @@ private fun AppointmentMonthDaySheet(
     swipeAnimationToken: Int,
     onDismiss: () -> Unit,
     onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onDateSwipe: (Int) -> Unit,
     onCreateAppointment: (LocalDate) -> Unit
 ) {
@@ -7741,11 +9562,12 @@ private fun AppointmentMonthDaySheet(
     val density = LocalDensity.current
     val horizontalSwipeThresholdPx = with(density) { 64.dp.toPx() }
     val hourHeight = 72.dp
-    LaunchedEffect(date, selectedAppointmentId, dayAppointments) {
+    LaunchedEffect(date, selectedAppointmentId, dayAppointments, dayOffs) {
         val selectedStart = dayAppointments
             .firstOrNull { it.appointment.id == selectedAppointmentId }
             ?.start
             ?: dayAppointments.firstOrNull()?.start
+            ?: dayOffs.firstOrNull()?.start
         val startMinute = selectedStart?.let { it.hour * 60 + it.minute } ?: 9 * 60
         val targetPx = with(density) {
             (hourHeight.toPx() * (startMinute / 60f) - 72.dp.toPx()).toInt()
@@ -7852,7 +9674,25 @@ private fun AppointmentMonthDaySheet(
                                         .padding(start = 48.dp, end = 8.dp, top = 2.dp, bottom = 2.dp)
                                 )
                             }
-                            if (dayAppointments.isEmpty()) {
+                            dayOffs.forEach { parsedDayOff ->
+                                val startMinute = parsedDayOff.start.hour * 60 + parsedDayOff.start.minute
+                                val durationMinutes = java.time.Duration.between(parsedDayOff.start, parsedDayOff.end)
+                                    .toMinutes()
+                                    .toInt()
+                                    .coerceAtLeast(15)
+                                val topOffset = hourHeight * (startMinute / 60f)
+                                val cardHeight = (hourHeight * (durationMinutes / 60f)).coerceAtLeast(44.dp)
+                                DayOffTimelineCard(
+                                    dayOff = parsedDayOff.dayOff,
+                                    onClick = onDayOffClick,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .offset(y = topOffset)
+                                        .height(cardHeight)
+                                        .padding(start = 48.dp, end = 8.dp, top = 2.dp, bottom = 2.dp)
+                                )
+                            }
+                            if (dayAppointments.isEmpty() && dayOffs.isEmpty()) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -7897,6 +9737,7 @@ private fun AppointmentMonthDaySheet(
 private fun AppointmentMonthView(
     selectedDate: LocalDate,
     appointmentIndex: AppointmentIndex,
+    dayOffIndex: DayOffIndex,
     financeSummary: FinanceSummary,
     fullSwipeAnimationDirection: Int,
     fullSwipeAnimationToken: Int,
@@ -7904,6 +9745,7 @@ private fun AppointmentMonthView(
     agendaSwipeAnimationToken: Int,
     onExpandedAppointmentClick: (AppointmentRow) -> Unit,
     onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onExpandedDayClick: (LocalDate) -> Unit,
     onCollapsedDayClick: (LocalDate) -> Unit,
     onMonthSwipe: (Int) -> Unit,
@@ -7923,6 +9765,9 @@ private fun AppointmentMonthView(
     val selectedDayAppointments = remember(selectedDate, appointmentIndex) {
         appointmentIndex.byDate[selectedDate].orEmpty()
     }
+    val selectedDayOffs = remember(selectedDate, dayOffIndex) {
+        dayOffIndex.byDate[selectedDate].orEmpty()
+    }
     val collapsedScrollState = rememberScrollState()
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     if (isLandscape) {
@@ -7935,11 +9780,14 @@ private fun AppointmentMonthView(
             AppointmentMonthLandscapeContent(
                 selectedDate = selectedDate,
                 selectedDayAppointments = selectedDayAppointments,
+                selectedDayOffs = selectedDayOffs,
                 weeks = weeks,
                 appointmentsByDate = appointmentIndex.byDate,
+                dayOffsByDate = dayOffIndex.byDate,
                 financeSummary = financeSummary,
                 scrollState = collapsedScrollState,
                 onAppointmentClick = onCollapsedAppointmentClick,
+                onDayOffClick = onDayOffClick,
                 onDayClick = onCollapsedDayClick,
                 onCalendarSwipe = onMonthSwipe,
                 onAgendaSwipe = onAgendaDaySwipe
@@ -7957,7 +9805,7 @@ private fun AppointmentMonthView(
     var gestureDistance by remember { mutableStateOf(0f) }
     val collapseProgress by animateFloatAsState(
         targetValue = monthModeIndex.toFloat(),
-        animationSpec = tween(durationMillis = 340, easing = FastOutSlowInEasing),
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
         label = "Month collapse progress"
     )
     fun agendaAtTop(): Boolean =
@@ -8047,8 +9895,10 @@ private fun AppointmentMonthView(
         AppointmentMonthPortraitMorphContent(
             selectedDate = selectedDate,
             selectedDayAppointments = selectedDayAppointments,
+            selectedDayOffs = selectedDayOffs,
             weeks = weeks,
             appointmentsByDate = appointmentIndex.byDate,
+            dayOffsByDate = dayOffIndex.byDate,
             financeSummary = financeSummary,
             scrollState = collapsedScrollState,
             collapseProgress = collapseProgress,
@@ -8059,6 +9909,7 @@ private fun AppointmentMonthView(
             agendaSwipeAnimationToken = agendaSwipeAnimationToken,
             onExpandedAppointmentClick = onExpandedAppointmentClick,
             onCollapsedAppointmentClick = onCollapsedAppointmentClick,
+            onDayOffClick = onDayOffClick,
             onExpandedDayClick = onExpandedDayClick,
             onCollapsedDayClick = onCollapsedDayClick,
             onMonthSwipe = onMonthSwipe,
@@ -8073,11 +9924,14 @@ private fun AppointmentMonthView(
 private fun AppointmentMonthLandscapeContent(
     selectedDate: LocalDate,
     selectedDayAppointments: List<AppointmentRow>,
+    selectedDayOffs: List<DayOffEntity>,
     weeks: List<List<LocalDate>>,
     appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
+    dayOffsByDate: Map<LocalDate, List<DayOffEntity>>,
     financeSummary: FinanceSummary,
     scrollState: ScrollState,
     onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onDayClick: (LocalDate) -> Unit,
     onCalendarSwipe: (Int) -> Unit,
     onAgendaSwipe: (Int, Boolean) -> Unit
@@ -8103,23 +9957,34 @@ private fun AppointmentMonthLandscapeContent(
                     .horizontalPeriodSwipe(horizontalSwipeThresholdPx, selectedDate, onCalendarSwipe)
             ) {
                 weeks.forEach { week ->
-                    Row(
+                    BoxWithConstraints(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
                     ) {
-                        week.forEach { day ->
-                            AppointmentMonthLandscapeDayCell(
-                                day = day,
-                                selectedDate = selectedDate,
-                                selectedMonth = selectedDate.month,
-                                appointments = appointmentsByDate[day].orEmpty(),
-                                onClick = { onDayClick(day) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight()
-                            )
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            week.forEach { day ->
+                                AppointmentMonthLandscapeDayCell(
+                                    day = day,
+                                    selectedDate = selectedDate,
+                                    selectedMonth = selectedDate.month,
+                                    appointments = appointmentsByDate[day].orEmpty(),
+                                    dayOffs = emptyList(),
+                                    onClick = { onDayClick(day) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                )
+                            }
                         }
+                        AppointmentMonthDayOffWeekSpans(
+                            week = week,
+                            dayOffsByDate = dayOffsByDate,
+                            rowHeight = maxHeight,
+                            compactProgress = 1f,
+                            clicksEnabled = true,
+                            onDayOffClick = onDayOffClick
+                        )
                     }
                 }
             }
@@ -8143,9 +10008,10 @@ private fun AppointmentMonthLandscapeContent(
         ) {
             AppointmentMonthSelectedDayHeader(
                 date = selectedDate,
-                appointmentCount = selectedDayAppointments.size
+                appointmentCount = selectedDayAppointments.size,
+                dayOffCount = selectedDayOffs.size
             )
-            if (selectedDayAppointments.isEmpty()) {
+            if (selectedDayAppointments.isEmpty() && selectedDayOffs.isEmpty()) {
                 Text(
                     "На этот день записей нет",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -8155,6 +10021,12 @@ private fun AppointmentMonthLandscapeContent(
                         .padding(horizontal = 10.dp, vertical = 18.dp)
                 )
             } else {
+                selectedDayOffs.forEach { dayOff ->
+                    DayOffMonthAgendaRow(
+                        dayOff = dayOff,
+                        onClick = onDayOffClick
+                    )
+                }
                 selectedDayAppointments.forEach { appointment ->
                     AppointmentMonthAgendaRow(
                         appointment = appointment,
@@ -8176,8 +10048,10 @@ private fun AppointmentMonthLandscapeContent(
 private fun AppointmentMonthPortraitMorphContent(
     selectedDate: LocalDate,
     selectedDayAppointments: List<AppointmentRow>,
+    selectedDayOffs: List<DayOffEntity>,
     weeks: List<List<LocalDate>>,
     appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
+    dayOffsByDate: Map<LocalDate, List<DayOffEntity>>,
     financeSummary: FinanceSummary,
     scrollState: ScrollState,
     collapseProgress: Float,
@@ -8188,6 +10062,7 @@ private fun AppointmentMonthPortraitMorphContent(
     agendaSwipeAnimationToken: Int,
     onExpandedAppointmentClick: (AppointmentRow) -> Unit,
     onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onExpandedDayClick: (LocalDate) -> Unit,
     onCollapsedDayClick: (LocalDate) -> Unit,
     onMonthSwipe: (Int) -> Unit,
@@ -8233,7 +10108,7 @@ private fun AppointmentMonthPortraitMorphContent(
             }
             val gridHeight = rowHeights.fold(0.dp) { total, rowHeight -> total + rowHeight }
             val dayNumberShiftPx = with(LocalDensity.current) {
-                (maxWidth / 7f).toPx() * 0.34f * compactProgress
+                (maxWidth / 7f).toPx() * 0.18f * compactProgress
             }
             Column(modifier = Modifier.fillMaxSize()) {
                 Column(
@@ -8252,7 +10127,7 @@ private fun AppointmentMonthPortraitMorphContent(
                         }
                 ) {
                     weeks.forEachIndexed { weekIndex, week ->
-                        Row(
+                        BoxWithConstraints(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(rowHeights[weekIndex])
@@ -8264,29 +10139,41 @@ private fun AppointmentMonthPortraitMorphContent(
                                     }
                                 }
                         ) {
-                            week.forEach { day ->
-                                AppointmentMonthMorphDayCell(
-                                    day = day,
-                                    today = today,
-                                    selectedDate = selectedDate,
-                                    selectedMonth = selectedDate.month,
-                                    appointments = appointmentsByDate[day].orEmpty(),
-                                    collapseProgress = compactProgress,
-                                    dayNumberShiftPx = dayNumberShiftPx,
-                                    appointmentClicksEnabled = monthMode == AppointmentMonthMode.Expanded,
-                                    onAppointmentClick = onExpandedAppointmentClick,
-                                    onDateClick = {
-                                        if (monthMode == AppointmentMonthMode.Expanded) {
-                                            onExpandedDayClick(day)
-                                        } else {
-                                            onCollapsedDayClick(day)
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                )
+                            Row(modifier = Modifier.fillMaxSize()) {
+                                week.forEach { day ->
+                                    AppointmentMonthMorphDayCell(
+                                        day = day,
+                                        today = today,
+                                        selectedDate = selectedDate,
+                                        selectedMonth = selectedDate.month,
+                                        appointments = appointmentsByDate[day].orEmpty(),
+                                        dayOffs = emptyList(),
+                                        collapseProgress = compactProgress,
+                                        dayNumberShiftPx = dayNumberShiftPx,
+                                        appointmentClicksEnabled = monthMode == AppointmentMonthMode.Expanded,
+                                        onAppointmentClick = onExpandedAppointmentClick,
+                                        onDayOffClick = onDayOffClick,
+                                        onDateClick = {
+                                            if (monthMode == AppointmentMonthMode.Expanded) {
+                                                onExpandedDayClick(day)
+                                            } else {
+                                                onCollapsedDayClick(day)
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
                             }
+                            AppointmentMonthDayOffWeekSpans(
+                                week = week,
+                                dayOffsByDate = dayOffsByDate,
+                                rowHeight = rowHeights[weekIndex],
+                                compactProgress = compactProgress,
+                                clicksEnabled = monthMode == AppointmentMonthMode.Expanded,
+                                onDayOffClick = onDayOffClick
+                            )
                         }
                     }
                 }
@@ -8305,7 +10192,7 @@ private fun AppointmentMonthPortraitMorphContent(
                         }
                         .graphicsLayer {
                             alpha = compactProgress
-                            translationY = 22f * (1f - compactProgress)
+                            translationY = 10f * (1f - compactProgress)
                         }
                     agendaModifier = if (monthMode == AppointmentMonthMode.SuperCollapsed) {
                         agendaModifier.verticalScroll(scrollState)
@@ -8324,9 +10211,10 @@ private fun AppointmentMonthPortraitMorphContent(
                         ) {
                             AppointmentMonthSelectedDayHeader(
                                 date = selectedDate,
-                                appointmentCount = selectedDayAppointments.size
+                                appointmentCount = selectedDayAppointments.size,
+                                dayOffCount = selectedDayOffs.size
                             )
-                            if (selectedDayAppointments.isEmpty()) {
+                            if (selectedDayAppointments.isEmpty() && selectedDayOffs.isEmpty()) {
                                 Text(
                                     "На этот день записей нет",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -8336,6 +10224,12 @@ private fun AppointmentMonthPortraitMorphContent(
                                         .padding(horizontal = 10.dp, vertical = 18.dp)
                                 )
                             } else {
+                                selectedDayOffs.forEach { dayOff ->
+                                    DayOffMonthAgendaRow(
+                                        dayOff = dayOff,
+                                        onClick = onDayOffClick
+                                    )
+                                }
                                 selectedDayAppointments.forEach { appointment ->
                                     AppointmentMonthAgendaRow(
                                         appointment = appointment,
@@ -8367,10 +10261,12 @@ private fun AppointmentMonthMorphDayCell(
     selectedDate: LocalDate,
     selectedMonth: java.time.Month,
     appointments: List<AppointmentRow>,
+    dayOffs: List<DayOffEntity>,
     collapseProgress: Float,
     dayNumberShiftPx: Float,
     appointmentClicksEnabled: Boolean,
     onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayOffClick: (DayOffEntity) -> Unit,
     onDateClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -8378,8 +10274,10 @@ private fun AppointmentMonthMorphDayCell(
     val isToday = day == today
     val isSelected = day == selectedDate
     val inMonth = day.month == selectedMonth
-    val expandedAppointments = remember(appointments) { appointments.take(3) }
-    val stripeAppointments = remember(appointments) { appointments.take(4) }
+    val expandedDayOffs = remember(dayOffs) { dayOffs.take(3) }
+    val expandedAppointments = remember(appointments, dayOffs) { appointments.take((3 - dayOffs.size).coerceAtLeast(0)) }
+    val stripeDayOffs = remember(dayOffs) { dayOffs.take(4) }
+    val stripeAppointments = remember(appointments, dayOffs) { appointments.take((4 - dayOffs.size).coerceAtLeast(0)) }
     val expandedBackground = if (isToday) {
         MaterialTheme.colorScheme.primaryContainer
     } else {
@@ -8428,7 +10326,6 @@ private fun AppointmentMonthMorphDayCell(
                     .align(Alignment.TopStart)
                     .graphicsLayer {
                         translationX = dayNumberShiftPx
-                        translationY = -2f * progress
                     }
             )
             if (appointmentClicksEnabled || progress < 0.98f) {
@@ -8439,11 +10336,38 @@ private fun AppointmentMonthMorphDayCell(
                         .padding(top = 22.dp)
                         .graphicsLayer {
                             alpha = 1f - progress
-                            translationY = -10f * progress
-                            scaleX = 1f - 0.08f * progress
                         },
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
+                    expandedDayOffs.forEach { dayOff ->
+                        Surface(
+                            color = dayOffContainerColor(),
+                            contentColor = dayOffContentColor(),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(16.dp)
+                                .clip(RoundedCornerShape(50))
+                                .clickable(enabled = appointmentClicksEnabled) { onDayOffClick(dayOff) }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    "${dayOffTimeOnly(dayOff)} ${dayOff.title.ifBlank { "Выходной" }}",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 11.sp,
+                                        lineHeight = 11.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
                     expandedAppointments.forEach { appointment ->
                         val isCancelled = appointment.status == APPOINTMENT_STATUS_CANCELLED
                         Surface(
@@ -8482,9 +10406,10 @@ private fun AppointmentMonthMorphDayCell(
                             }
                         }
                     }
-                    if (appointments.size > 3) {
+                    val hiddenItems = appointments.size + dayOffs.size - 3
+                    if (hiddenItems > 0) {
                         Text(
-                            "+${appointments.size - 3}",
+                            "+$hiddenItems",
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 11.sp),
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -8501,6 +10426,16 @@ private fun AppointmentMonthMorphDayCell(
                     },
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                stripeDayOffs.forEach { _ ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.82f)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(dayOffAccentColor())
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
                 stripeAppointments.forEach { appointment ->
                     Box(
                         modifier = Modifier
@@ -8518,6 +10453,87 @@ private fun AppointmentMonthMorphDayCell(
                         .fillMaxSize()
                         .clickable(onClick = onDateClick)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthDayOffWeekSpans(
+    week: List<LocalDate>,
+    dayOffsByDate: Map<LocalDate, List<DayOffEntity>>,
+    rowHeight: Dp,
+    compactProgress: Float,
+    clicksEnabled: Boolean,
+    onDayOffClick: (DayOffEntity) -> Unit
+) {
+    if (week.isEmpty() || rowHeight <= 0.dp) return
+    val weekDayOffs = remember(week, dayOffsByDate) {
+        week.flatMap { date -> dayOffsByDate[date].orEmpty() }
+            .distinctBy { it.id }
+            .mapNotNull { dayOff -> dayOffWeekSpan(dayOff, week)?.let { span -> dayOff to span } }
+            .sortedWith(compareBy({ it.second.first }, { parseAppointmentMillis(it.first.startAt) ?: Long.MAX_VALUE }))
+            .take(2)
+    }
+    if (weekDayOffs.isEmpty()) return
+    val progress = compactProgress.coerceIn(0f, 1f)
+    val expandedHeight = 18.dp
+    val compactHeight = 4.dp
+    val bannerHeight = lerpDp(expandedHeight, compactHeight, progress)
+    val expandedTop = 24.dp
+    val compactTop = maxOf(18.dp, rowHeight - 18.dp)
+    val baseTop = lerpDp(expandedTop, compactTop, progress)
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val cellWidthDp = maxWidth / 7f
+        weekDayOffs.forEachIndexed { index, item ->
+            val (dayOff, span) = item
+            val laneOffset = lerpDp((index * 20).dp, (index * 6).dp, progress)
+            val startInset = if (span.startsHere) 3.dp else 0.dp
+            val endInset = if (span.endsHere) 3.dp else 0.dp
+            val corner = lerpDp(8.dp, 50.dp, progress)
+            val spanWidth = maxOf(0.dp, cellWidthDp * span.length.toFloat() - startInset - endInset)
+            Surface(
+                color = dayOffContainerColor(),
+                contentColor = dayOffContentColor(),
+                shape = RoundedCornerShape(
+                    topStart = if (span.startsHere) corner else 0.dp,
+                    bottomStart = if (span.startsHere) corner else 0.dp,
+                    topEnd = if (span.endsHere) corner else 0.dp,
+                    bottomEnd = if (span.endsHere) corner else 0.dp
+                ),
+                modifier = Modifier
+                    .width(spanWidth)
+                    .offset(
+                        x = cellWidthDp * span.first.toFloat() + startInset,
+                        y = baseTop + laneOffset
+                    )
+                    .height(bannerHeight)
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = if (span.startsHere) corner else 0.dp,
+                            bottomStart = if (span.startsHere) corner else 0.dp,
+                            topEnd = if (span.endsHere) corner else 0.dp,
+                            bottomEnd = if (span.endsHere) corner else 0.dp
+                        )
+                    )
+                    .clickable(enabled = clicksEnabled) { onDayOffClick(dayOff) }
+            ) {
+                if (progress < 0.72f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 5.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Text(
+                            dayOff.title.ifBlank { "Выходной" },
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 11.sp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.graphicsLayer { alpha = 1f - progress }
+                        )
+                    }
+                }
             }
         }
     }
@@ -8803,6 +10819,7 @@ private fun AppointmentMonthLandscapeDayCell(
     selectedDate: LocalDate,
     selectedMonth: java.time.Month,
     appointments: List<AppointmentRow>,
+    dayOffs: List<DayOffEntity>,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -8841,7 +10858,17 @@ private fun AppointmentMonthLandscapeDayCell(
                 maxLines = 1
             )
             Spacer(Modifier.weight(1f))
-            appointments.take(3).forEach { appointment ->
+            dayOffs.take(3).forEach { _ ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.78f)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(dayOffAccentColor())
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+            appointments.take((3 - dayOffs.size).coerceAtLeast(0)).forEach { appointment ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.78f)
@@ -8858,8 +10885,10 @@ private fun AppointmentMonthLandscapeDayCell(
 @Composable
 private fun AppointmentMonthSelectedDayHeader(
     date: LocalDate,
-    appointmentCount: Int
+    appointmentCount: Int,
+    dayOffCount: Int = 0
 ) {
+    val totalCount = appointmentCount + dayOffCount
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -8881,7 +10910,7 @@ private fun AppointmentMonthSelectedDayHeader(
         )
         Spacer(Modifier.weight(1f))
         Text(
-            "Записей: $appointmentCount",
+            if (dayOffCount > 0) "Событий: $totalCount" else "Записей: $appointmentCount",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 6.dp)
@@ -8947,12 +10976,109 @@ private fun AppointmentMonthAgendaRow(
 }
 
 @Composable
+private fun DayOffMonthAgendaRow(
+    dayOff: DayOffEntity,
+    onClick: (DayOffEntity) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { onClick(dayOff) }
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                dayOffTimeOnly(dayOff),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.width(58.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(dayOffAccentColor())
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    dayOff.title.ifBlank { "Выходной" },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    dayOffTimeRange(dayOff),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 80.dp, end = 10.dp)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+        )
+    }
+}
+
+@Composable
 private fun appointmentMonthAccentColor(appointment: AppointmentRow): Color =
     when {
         appointment.status == APPOINTMENT_STATUS_CANCELLED -> MaterialTheme.colorScheme.error
         appointment.calendarEventId > 0 -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.primary
     }
+
+@Composable
+private fun dayOffAccentColor(): Color {
+    val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        systemColor(
+            context,
+            if (darkTheme) android.R.color.system_accent2_300 else android.R.color.system_accent2_600
+        )
+    } else {
+        MaterialTheme.colorScheme.secondary
+    }
+}
+
+@Composable
+private fun dayOffContainerColor(): Color {
+    val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        systemColor(
+            context,
+            if (darkTheme) android.R.color.system_accent2_700 else android.R.color.system_accent2_100
+        )
+    } else {
+        MaterialTheme.colorScheme.secondaryContainer
+    }
+}
+
+@Composable
+private fun dayOffContentColor(): Color {
+    val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        systemColor(
+            context,
+            if (darkTheme) android.R.color.system_accent2_100 else android.R.color.system_accent2_900
+        )
+    } else {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    }
+}
 
 private fun lerpDp(start: Dp, stop: Dp, fraction: Float): Dp =
     (start.value + (stop.value - start.value) * fraction.coerceIn(0f, 1f)).dp
@@ -9426,6 +11552,269 @@ private fun AppointmentMoveSheet(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun DayOffDetailScreen(
+    dayOff: DayOffEntity,
+    hasCalendarPermissions: Boolean,
+    onBack: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var showDeleteConfirm by remember(dayOff.id) { mutableStateOf(false) }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Выходной", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onEdit) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Изменить выходной")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(96.dp)
+                            .clip(CircleShape)
+                            .background(dayOffContainerColor()),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.AccessTime,
+                            contentDescription = null,
+                            tint = dayOffContentColor(),
+                            modifier = Modifier.size(44.dp)
+                        )
+                    }
+                    Text(
+                        dayOff.title.ifBlank { "Выходной" },
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        dayOffTimeRange(dayOff),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+            item {
+                DetailCard {
+                    AppointmentDetailRow(
+                        icon = Icons.Filled.Event,
+                        title = formatDayOffDateForDetail(dayOff),
+                        subtitle = dayOffTimeRange(dayOff)
+                    )
+                    AppointmentDetailRow(
+                        icon = Icons.Filled.Sync,
+                        title = "Календарь",
+                        subtitle = dayOffCalendarStatusLabel(dayOff, hasCalendarPermissions)
+                    )
+                }
+            }
+            if (dayOff.notes.isNotBlank()) {
+                item {
+                    DetailCard {
+                        AppointmentDetailRow(
+                            icon = Icons.Filled.Notes,
+                            title = "Комментарий",
+                            subtitle = dayOff.notes
+                        )
+                    }
+                }
+            }
+            item {
+                Button(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp)
+                ) {
+                    Icon(Icons.Filled.RemoveCircleOutline, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Удалить выходной")
+                }
+            }
+        }
+    }
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Удалить выходной?") },
+            text = { Text("Блокировка времени будет удалена из CRM. Если она связана с календарем и есть разрешение, событие календаря тоже будет удалено.") },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Отмена")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete()
+                    }
+                ) {
+                    Text("Удалить")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun DayOffEditorContent(
+    title: String,
+    dayOffTitle: String,
+    startDate: LocalDate,
+    endDate: LocalDate,
+    startTime: String,
+    endTime: String,
+    notes: String,
+    canSave: Boolean,
+    onClose: () -> Unit,
+    onTitleChange: (String) -> Unit,
+    onOpenRangePicker: () -> Unit,
+    onOpenStartTimePicker: () -> Unit,
+    onOpenEndTimePicker: () -> Unit,
+    onNotesChange: (String) -> Unit,
+    onSave: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                modifier = Modifier.height(112.dp),
+                navigationIcon = {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                    }
+                },
+                title = { Text(title) },
+                actions = {
+                    Button(
+                        onClick = onSave,
+                        enabled = canSave,
+                        shape = RoundedCornerShape(28.dp),
+                        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text("Сохранить")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            )
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 26.dp, bottom = 36.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .size(86.dp)
+                        .clip(CircleShape)
+                        .background(dayOffContainerColor()),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.AccessTime,
+                        contentDescription = null,
+                        tint = dayOffContentColor(),
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+            }
+            item {
+                OutlinedTextField(
+                    value = dayOffTitle,
+                    onValueChange = onTitleChange,
+                    label = { Text("Название") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                OutlinedButton(onClick = onOpenRangePicker, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.DateRange, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(dayOffPeriodLabel(startDate, endDate), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = onOpenStartTimePicker, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Filled.AccessTime, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Начало $startTime", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    OutlinedButton(onClick = onOpenEndTimePicker, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Filled.AccessTime, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Конец $endTime", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            item {
+                AppointmentNotesField(
+                    notes = notes,
+                    onNotesChange = onNotesChange
+                )
+            }
+            if (!canSave) {
+                item {
+                    Text(
+                        "Конец должен быть позже начала.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DetailCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -9776,6 +12165,108 @@ private fun AppointmentConflictDialog(
         confirmButton = {
             Button(onClick = onSaveAndMoveConflicting) {
                 Text("Сохранить и перенести")
+            }
+        }
+    )
+}
+
+@Composable
+private fun DayOffAppointmentConflictDialog(
+    appointments: List<AppointmentRow>,
+    startAt: String,
+    endAt: String,
+    onKeepEditing: () -> Unit,
+    onMoveAppointments: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onKeepEditing,
+        title = { Text("В периоде есть записи") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Выходной ${dayOffRangeLabel(startAt, endAt)} пересекается с записями.")
+                appointments.take(4).forEach { appointment ->
+                    Text(
+                        "${appointmentTimeRange(appointment)} · ${appointment.service.ifBlank { "Запись" }} · ${appointment.clientName}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (appointments.size > 4) {
+                    Text(
+                        "Еще ${appointments.size - 4}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    "Можно вернуться к форме или перенести записи вручную по очереди.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onKeepEditing) {
+                Text("Продолжить форму")
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onMoveAppointments,
+                enabled = appointments.isNotEmpty()
+            ) {
+                Text("Перенести записи")
+            }
+        }
+    )
+}
+
+@Composable
+private fun DayOffMergeConflictDialog(
+    dayOffs: List<DayOffEntity>,
+    startAt: String,
+    endAt: String,
+    mergedStartAt: String,
+    mergedEndAt: String,
+    onKeepEditing: () -> Unit,
+    onMerge: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onKeepEditing,
+        title = { Text("Выходные пересекаются") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("В один день не может быть несколько выходных.")
+                Text("Новый период: ${dayOffRangeLabel(startAt, endAt)}.")
+                dayOffs.take(4).forEach { dayOff ->
+                    Text(
+                        "${dayOff.title.ifBlank { "Выходной" }} · ${dayOffTimeRange(dayOff)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (dayOffs.size > 4) {
+                    Text(
+                        "Еще ${dayOffs.size - 4}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    "При объединении останется один выходной: ${dayOffRangeLabel(mergedStartAt, mergedEndAt)}.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onKeepEditing) {
+                Text("Изменить дату")
+            }
+        },
+        confirmButton = {
+            Button(onClick = onMerge) {
+                Text("Объединить")
             }
         }
     )
@@ -10154,12 +12645,14 @@ data class FinanceJournalItem(
     val amountCents: Long,
     val date: String,
     val appointment: AppointmentRow? = null,
+    val transaction: FinanceTransactionEntity? = null,
     val isDebt: Boolean = false
 )
 
 private data class FinanceUiState(
     val summary: FinanceSummary = FinanceSummary(0, 0, 0, 0),
-    val journalItems: List<FinanceJournalItem> = emptyList()
+    val journalItems: List<FinanceJournalItem> = emptyList(),
+    val appointmentCount: Int = 0
 )
 
 @Composable
@@ -10170,9 +12663,12 @@ private fun FinanceScreen(
     transactions: List<FinanceTransactionEntity>,
     onEditorOpenChange: (Boolean) -> Unit
 ) {
-    var selectedMonth by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
+    var selectedPeriodDate by remember { mutableStateOf(LocalDate.now()) }
+    var periodMode by remember { mutableStateOf(FinancePeriodMode.Month) }
     var filter by remember { mutableStateOf(financeFilterOptions.first()) }
-    var showTransactionSheet by remember { mutableStateOf(false) }
+    var showAddFinanceMenu by remember { mutableStateOf(false) }
+    var showExpenseTransactionSheet by remember { mutableStateOf(false) }
+    var showIncomeTransactionSheet by remember { mutableStateOf(false) }
     var showPaymentSheet by remember { mutableStateOf(false) }
     var showTransactionDatePicker by remember { mutableStateOf(false) }
     var showPaymentDatePicker by remember { mutableStateOf(false) }
@@ -10183,20 +12679,36 @@ private fun FinanceScreen(
     var transactionDate by remember { mutableStateOf(LocalDate.now()) }
     var transactionMethod by remember { mutableStateOf(paymentMethodOptions.first()) }
     var transactionNotes by remember { mutableStateOf("") }
+    var editingTransaction by remember { mutableStateOf<FinanceTransactionEntity?>(null) }
+    var pendingDeleteTransaction by remember { mutableStateOf<FinanceTransactionEntity?>(null) }
     var selectedPaymentAppointment by remember { mutableStateOf<AppointmentRow?>(null) }
+    var selectedAutomaticPaymentAppointment by remember { mutableStateOf<AppointmentRow?>(null) }
+    var pendingCancelPaymentAppointment by remember { mutableStateOf<AppointmentRow?>(null) }
     var paymentAmount by remember { mutableStateOf("") }
     var paymentMethod by remember { mutableStateOf(paymentMethodOptions.first()) }
     var paymentDate by remember { mutableStateOf(LocalDate.now()) }
+    val periodRange = remember(periodMode, selectedPeriodDate) {
+        financePeriodRange(periodMode, selectedPeriodDate)
+    }
+    val periodTitle = remember(periodMode, selectedPeriodDate) {
+        financePeriodTitle(periodMode, selectedPeriodDate)
+    }
+    val showTransactionSheet = showExpenseTransactionSheet || showIncomeTransactionSheet
 
     val financeUiState by produceState(
         initialValue = FinanceUiState(),
         appointmentIndex,
         transactions,
-        selectedMonth,
+        periodRange,
         filter
     ) {
         value = withContext(Dispatchers.Default) {
-            val journalItems = financeJournalForMonth(appointmentIndex, transactions, selectedMonth)
+            val journalItems = financeJournalForRange(
+                appointmentIndex = appointmentIndex,
+                transactions = transactions,
+                startDate = periodRange.first,
+                endDate = periodRange.second
+            )
                 .filter { item ->
                     when (filter) {
                         "Доходы" -> item.kind == FINANCE_TYPE_INCOME
@@ -10207,26 +12719,41 @@ private fun FinanceScreen(
                 }
                 .sortedWith(compareByDescending<FinanceJournalItem> { parseFinanceLocalDate(it.date) ?: LocalDate.MIN }.thenByDescending { it.key })
             FinanceUiState(
-                summary = financeSummaryForMonth(appointmentIndex, transactions, selectedMonth),
-                journalItems = journalItems
+                summary = financeSummaryForRange(appointmentIndex, transactions, periodRange.first, periodRange.second),
+                journalItems = journalItems,
+                appointmentCount = financeAppointmentCountForRange(appointmentIndex, periodRange.first, periodRange.second)
             )
         }
     }
     val summary = financeUiState.summary
     val journalItems = financeUiState.journalItems
+    val appointmentCount = financeUiState.appointmentCount
 
-    fun openTransactionEditor() {
-        showTransactionSheet = true
+    fun openTransactionEditor(transaction: FinanceTransactionEntity? = null, initialType: String = FINANCE_TYPE_EXPENSE) {
+        editingTransaction = transaction
+        transactionType = transaction?.type ?: initialType
+        transactionAmount = transaction?.let { formatMoneyPlain(it.amountCents) }.orEmpty()
+        transactionTitle = transaction?.title.orEmpty()
+        transactionCategory = transaction?.category.orEmpty()
+        transactionDate = transaction?.date?.let { parseFinanceLocalDate(it) } ?: LocalDate.now()
+        transactionMethod = transaction?.paymentMethod?.ifBlank { paymentMethodOptions.first() } ?: paymentMethodOptions.first()
+        transactionNotes = transaction?.notes.orEmpty()
+        showExpenseTransactionSheet = transactionType == FINANCE_TYPE_EXPENSE
+        showIncomeTransactionSheet = transactionType == FINANCE_TYPE_INCOME
         onEditorOpenChange(true)
     }
 
     fun closeTransactionEditor() {
-        showTransactionSheet = false
+        showExpenseTransactionSheet = false
+        showIncomeTransactionSheet = false
+        showTransactionDatePicker = false
+        editingTransaction = null
         onEditorOpenChange(false)
     }
 
     fun saveTransactionDraft() {
-        viewModel.addFinanceTransaction(
+        viewModel.saveFinanceTransaction(
+            transactionId = editingTransaction?.id,
             type = transactionType,
             amount = transactionAmount,
             title = transactionTitle,
@@ -10238,7 +12765,16 @@ private fun FinanceScreen(
         closeTransactionEditor()
     }
 
-    BackHandler(enabled = showTransactionSheet) {
+    BackHandler(enabled = pendingDeleteTransaction != null) {
+        pendingDeleteTransaction = null
+    }
+    BackHandler(enabled = pendingCancelPaymentAppointment != null) {
+        pendingCancelPaymentAppointment = null
+    }
+    BackHandler(enabled = showAddFinanceMenu) {
+        showAddFinanceMenu = false
+    }
+    BackHandler(enabled = showTransactionSheet && pendingDeleteTransaction == null) {
         closeTransactionEditor()
     }
 
@@ -10249,14 +12785,18 @@ private fun FinanceScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                FinanceMonthHeader(
-                    selectedMonth = selectedMonth,
-                    onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
-                    onNext = { selectedMonth = selectedMonth.plusMonths(1) },
-                    onCurrent = { selectedMonth = LocalDate.now().withDayOfMonth(1) }
+                FinancePeriodHeader(
+                    title = periodTitle,
+                    selectedMode = periodMode,
+                    onModeChange = { mode ->
+                        periodMode = mode
+                    },
+                    onPrevious = { selectedPeriodDate = selectedPeriodDate.shiftFinancePeriod(periodMode, -1) },
+                    onNext = { selectedPeriodDate = selectedPeriodDate.shiftFinancePeriod(periodMode, 1) },
+                    onCurrent = { selectedPeriodDate = LocalDate.now() }
                 )
             }
-            item { FinanceSummaryGrid(summary) }
+            item { FinanceSummaryGrid(summary, appointmentCount, financeAppointmentCountTitle(periodMode)) }
             item {
                 FinanceFilterRow(
                     selectedFilter = filter,
@@ -10264,58 +12804,95 @@ private fun FinanceScreen(
                 )
             }
             if (journalItems.isEmpty()) {
-                item { EmptyText("За этот месяц операций нет.") }
+                item { EmptyText("За этот период операций нет.") }
             } else {
                 items(journalItems, key = { it.key }) { item ->
                     FinanceJournalRow(
                         item = item,
                         onClick = {
+                            val transaction = item.transaction
                             val appointment = item.appointment
-                            if (appointment != null && item.isDebt) {
+                            if (transaction != null) {
+                                openTransactionEditor(transaction)
+                            } else if (appointment != null && item.isDebt) {
                                 selectedPaymentAppointment = appointment
                                 paymentAmount = formatMoneyPlain(appointmentRemainingCents(appointment))
                                 paymentMethod = appointment.paymentMethod.ifBlank { paymentMethodOptions.first() }
                                 paymentDate = LocalDate.now()
                                 showPaymentSheet = true
+                            } else if (appointment != null) {
+                                selectedAutomaticPaymentAppointment = appointment
                             }
                         }
                     )
                 }
             }
         }
-        FloatingActionButton(
-            onClick = {
-                transactionType = FINANCE_TYPE_EXPENSE
-                transactionAmount = ""
-                transactionTitle = ""
-                transactionCategory = ""
-                transactionDate = LocalDate.now()
-                transactionMethod = paymentMethodOptions.first()
-                transactionNotes = ""
-                openTransactionEditor()
-            },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp)
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "Добавить операцию")
+        if (showAddFinanceMenu) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.42f))
+                    .clickable { showAddFinanceMenu = false }
+            )
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 20.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ClientAddMenuAction(
+                    icon = Icons.Filled.RemoveCircleOutline,
+                    label = "Расход",
+                    onClick = {
+                        showAddFinanceMenu = false
+                        openTransactionEditor(initialType = FINANCE_TYPE_EXPENSE)
+                    }
+                )
+                ClientAddMenuAction(
+                    icon = Icons.Filled.Payments,
+                    label = "Доход",
+                    onClick = {
+                        showAddFinanceMenu = false
+                        openTransactionEditor(initialType = FINANCE_TYPE_INCOME)
+                    }
+                )
+                FloatingActionButton(
+                    onClick = { showAddFinanceMenu = false },
+                    shape = CircleShape,
+                    modifier = Modifier.size(64.dp)
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                }
+            }
+        } else {
+            FloatingActionButton(
+                onClick = { showAddFinanceMenu = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp)
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Добавить операцию")
+            }
         }
     }
 
-    if (showTransactionSheet) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.surface
+    if (showExpenseTransactionSheet) {
+        val transactionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { closeTransactionEditor() },
+            sheetState = transactionSheetState
         ) {
             FinanceTransactionEditor(
-                type = transactionType,
+                type = FINANCE_TYPE_EXPENSE,
                 amount = transactionAmount,
                 title = transactionTitle,
                 category = transactionCategory,
                 date = transactionDate,
                 paymentMethod = transactionMethod,
                 notes = transactionNotes,
-                onTypeChange = { transactionType = it },
+                isEditing = editingTransaction != null,
                 onAmountChange = { transactionAmount = it },
                 onTitleChange = { transactionTitle = it },
                 onCategoryChange = { transactionCategory = it },
@@ -10323,7 +12900,40 @@ private fun FinanceScreen(
                 onPaymentMethodChange = { transactionMethod = it },
                 onNotesChange = { transactionNotes = it },
                 onClose = { closeTransactionEditor() },
-                onSave = { saveTransactionDraft() }
+                onSave = { saveTransactionDraft() },
+                onDelete = editingTransaction?.let { transaction ->
+                    { pendingDeleteTransaction = transaction }
+                }
+            )
+        }
+    }
+
+    if (showIncomeTransactionSheet) {
+        val transactionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { closeTransactionEditor() },
+            sheetState = transactionSheetState
+        ) {
+            FinanceTransactionEditor(
+                type = FINANCE_TYPE_INCOME,
+                amount = transactionAmount,
+                title = transactionTitle,
+                category = transactionCategory,
+                date = transactionDate,
+                paymentMethod = transactionMethod,
+                notes = transactionNotes,
+                isEditing = editingTransaction != null,
+                onAmountChange = { transactionAmount = it },
+                onTitleChange = { transactionTitle = it },
+                onCategoryChange = { transactionCategory = it },
+                onOpenDatePicker = { showTransactionDatePicker = true },
+                onPaymentMethodChange = { transactionMethod = it },
+                onNotesChange = { transactionNotes = it },
+                onClose = { closeTransactionEditor() },
+                onSave = { saveTransactionDraft() },
+                onDelete = editingTransaction?.let { transaction ->
+                    { pendingDeleteTransaction = transaction }
+                }
             )
         }
     }
@@ -10366,6 +12976,71 @@ private fun FinanceScreen(
                 )
             }
         }
+    }
+
+    selectedAutomaticPaymentAppointment?.let { appointment ->
+        val automaticOperationState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { selectedAutomaticPaymentAppointment = null },
+            sheetState = automaticOperationState
+        ) {
+            AutomaticFinanceOperationSheet(
+                appointment = appointment,
+                onCancelPayment = { pendingCancelPaymentAppointment = appointment }
+            )
+        }
+    }
+
+    pendingDeleteTransaction?.let { transaction ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteTransaction = null },
+            title = { Text("Удалить операцию?") },
+            text = { Text("Операция «${transaction.title}» будет удалена из финансов.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteFinanceTransaction(transaction.id)
+                        pendingDeleteTransaction = null
+                        closeTransactionEditor()
+                    }
+                ) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteTransaction = null }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    pendingCancelPaymentAppointment?.let { appointment ->
+        AlertDialog(
+            onDismissRequest = { pendingCancelPaymentAppointment = null },
+            title = { Text("Отменить оплату?") },
+            text = {
+                Text(
+                    "Оплата ${formatMoney(appointment.paidAmountCents)} по записи «${appointment.service.ifBlank { "Запись" }}» будет отменена."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.cancelAppointmentPayment(appointment.id)
+                        pendingCancelPaymentAppointment = null
+                        selectedAutomaticPaymentAppointment = null
+                    }
+                ) {
+                    Text("Отменить оплату", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingCancelPaymentAppointment = null }) {
+                    Text("Назад")
+                }
+            }
+        )
     }
 
     if (showTransactionDatePicker) {
@@ -10500,32 +13175,65 @@ private fun FinanceFilterRow(
 }
 
 @Composable
-private fun FinanceMonthHeader(
-    selectedMonth: LocalDate,
+private fun FinancePeriodHeader(
+    title: String,
+    selectedMode: FinancePeriodMode,
+    onModeChange: (FinancePeriodMode) -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onCurrent: () -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        IconButton(onClick = onPrevious) {
-            Icon(Icons.Filled.ChevronLeft, contentDescription = "Предыдущий месяц")
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            IconButton(onClick = onPrevious) {
+                Icon(Icons.Filled.ChevronLeft, contentDescription = "Предыдущий период")
+            }
+            Text(
+                title,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onNext) {
+                Icon(Icons.Filled.ChevronRight, contentDescription = "Следующий период")
+            }
+            TextButton(onClick = onCurrent) { Text("Сейчас") }
         }
-        Text(
-            selectedMonth.format(monthTitleFormatter).replaceFirstChar { it.titlecase(ruLocale) },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.weight(1f)
-        )
-        IconButton(onClick = onNext) {
-            Icon(Icons.Filled.ChevronRight, contentDescription = "Следующий месяц")
-        }
-        TextButton(onClick = onCurrent) { Text("Этот") }
+        FinancePeriodModeRow(selectedMode = selectedMode, onModeChange = onModeChange)
     }
 }
 
 @Composable
-private fun FinanceSummaryGrid(summary: FinanceSummary) {
+private fun FinancePeriodModeRow(
+    selectedMode: FinancePeriodMode,
+    onModeChange: (FinancePeriodMode) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        financePeriodModes.forEach { mode ->
+            val selected = mode == selectedMode
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(24.dp))
+                    .clickable { onModeChange(mode) },
+                shape = RoundedCornerShape(24.dp),
+                color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow
+            ) {
+                Text(
+                    mode.label,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                    textAlign = TextAlign.Center,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                    color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FinanceSummaryGrid(summary: FinanceSummary, appointmentCount: Int, appointmentCountTitle: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             FinanceSummaryCard("Начислено", summary.accruedCents, Modifier.weight(1f))
@@ -10535,6 +13243,11 @@ private fun FinanceSummaryGrid(summary: FinanceSummary) {
             FinanceSummaryCard("Долги", summary.debtCents, Modifier.weight(1f))
             FinanceSummaryCard("Расходы", summary.expenseCents, Modifier.weight(1f))
         }
+        FinanceSummaryTextCard(
+            title = appointmentCountTitle,
+            value = appointmentCountLabel(appointmentCount),
+            modifier = Modifier.fillMaxWidth()
+        )
         FinanceSummaryCard("Итого", summary.totalCents, Modifier.fillMaxWidth(), highlight = true)
     }
 }
@@ -10554,7 +13267,34 @@ private fun FinanceSummaryCard(title: String, amountCents: Long, modifier: Modif
 }
 
 @Composable
+private fun FinanceSummaryTextCard(title: String, value: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                value,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
 private fun FinanceJournalRow(item: FinanceJournalItem, onClick: () -> Unit) {
+    val canOpen = item.transaction != null || item.appointment != null
     val amountText = when {
         item.isDebt -> formatMoney(item.amountCents)
         item.kind == FINANCE_TYPE_EXPENSE -> "-${formatMoney(item.amountCents)}"
@@ -10569,7 +13309,7 @@ private fun FinanceJournalRow(item: FinanceJournalItem, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .clickable(enabled = item.appointment != null && item.isDebt, onClick = onClick),
+            .clickable(enabled = canOpen, onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = RoundedCornerShape(16.dp)
     ) {
@@ -10594,7 +13334,7 @@ private fun FinanceTransactionEditor(
     date: LocalDate,
     paymentMethod: String,
     notes: String,
-    onTypeChange: (String) -> Unit,
+    isEditing: Boolean,
     onAmountChange: (String) -> Unit,
     onTitleChange: (String) -> Unit,
     onCategoryChange: (String) -> Unit,
@@ -10602,91 +13342,164 @@ private fun FinanceTransactionEditor(
     onPaymentMethodChange: (String) -> Unit,
     onNotesChange: (String) -> Unit,
     onClose: () -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
+    onDelete: (() -> Unit)? = null
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                modifier = Modifier.height(112.dp),
-                navigationIcon = {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.Filled.Close, contentDescription = "Закрыть")
-                    }
-                },
-                title = { Text("Новая\nоперация") },
-                actions = {
-                    Button(
-                        onClick = onSave,
-                        enabled = amount.isNotBlank() && title.isNotBlank(),
-                        shape = RoundedCornerShape(28.dp),
-                        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 10.dp)
-                    ) {
-                        Text("Сохранить")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
-                    actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val operationLabel = if (type == FINANCE_TYPE_INCOME) "доход" else "расход"
+    val titleText = if (isEditing) {
+        "Изменить $operationLabel"
+    } else {
+        "Новый $operationLabel"
+    }
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    titleText,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
                 )
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                }
+            }
+        }
+        item {
+            OutlinedTextField(
+                value = amount,
+                onValueChange = onAmountChange,
+                label = { Text("Сумма, ₽") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
             )
         }
-    ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-            contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 26.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    financeTypeOptions.forEach { option ->
-                        val label = if (option == FINANCE_TYPE_EXPENSE) "Расход" else "Доход"
-                        if (type == option) {
-                            Button(onClick = { onTypeChange(option) }, modifier = Modifier.weight(1f)) { Text(label) }
-                        } else {
-                            OutlinedButton(onClick = { onTypeChange(option) }, modifier = Modifier.weight(1f)) { Text(label) }
-                        }
-                    }
-                }
-            }
-            item {
-                OutlinedTextField(
-                    value = amount,
-                    onValueChange = onAmountChange,
-                    label = { Text("Сумма, ₽") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                OutlinedTextField(value = title, onValueChange = onTitleChange, label = { Text("Название") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            }
-            item {
-                OutlinedTextField(value = category, onValueChange = onCategoryChange, label = { Text("Категория") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            }
-            item {
-                OutlinedButton(onClick = onOpenDatePicker, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Filled.DateRange, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(financeDateDisplay(financeDateString(date)))
-                }
-            }
-            item {
-                DropdownField("Способ оплаты", paymentMethod) { close ->
-                    paymentMethodOptions.forEach { option ->
-                        DropdownMenuItem(text = { Text(option) }, onClick = { onPaymentMethodChange(option); close() })
-                    }
-                }
-            }
-            item {
-                OutlinedTextField(value = notes, onValueChange = onNotesChange, label = { Text("Комментарий") }, minLines = 3, modifier = Modifier.fillMaxWidth())
-            }
-            item { Spacer(Modifier.height(24.dp)) }
+        item {
+            OutlinedTextField(value = title, onValueChange = onTitleChange, label = { Text("Название") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         }
+        item {
+            OutlinedTextField(value = category, onValueChange = onCategoryChange, label = { Text("Категория") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            OutlinedButton(onClick = onOpenDatePicker, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.DateRange, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(financeDateDisplay(financeDateString(date)))
+            }
+        }
+        item {
+            DropdownField("Способ оплаты", paymentMethod) { close ->
+                paymentMethodOptions.forEach { option ->
+                    DropdownMenuItem(text = { Text(option) }, onClick = { onPaymentMethodChange(option); close() })
+                }
+            }
+        }
+        item {
+            OutlinedTextField(value = notes, onValueChange = onNotesChange, label = { Text("Комментарий") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            Button(
+                onClick = onSave,
+                enabled = amount.isNotBlank() && title.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
+            ) {
+                Text("Сохранить")
+            }
+        }
+        if (isEditing && onDelete != null) {
+            item {
+                OutlinedButton(
+                    onClick = onDelete,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Filled.RemoveCircleOutline, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Удалить операцию")
+                }
+            }
+        }
+        item { Spacer(Modifier.height(10.dp)) }
+    }
+}
+
+@Composable
+private fun AutomaticFinanceOperationSheet(
+    appointment: AppointmentRow,
+    onCancelPayment: () -> Unit
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Text("Оплата записи", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                appointment.service.ifBlank { "Запись" },
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    FinanceOperationInfoRow("Клиент", appointment.clientName)
+                    FinanceOperationInfoRow("Сумма", formatMoney(appointment.paidAmountCents))
+                    FinanceOperationInfoRow("Дата", financeDateDisplay(appointment.paidAt.ifBlank { appointment.startAt }))
+                    FinanceOperationInfoRow("Способ", appointment.paymentMethod.ifBlank { "Не указан" })
+                }
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = onCancelPayment,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+            ) {
+                Icon(Icons.Filled.RemoveCircleOutline, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Отменить оплату")
+            }
+        }
+        item { Spacer(Modifier.height(10.dp)) }
+    }
+}
+
+@Composable
+private fun FinanceOperationInfoRow(title: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            value,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 
@@ -10835,12 +13648,10 @@ private fun AppointmentClientPicker(
             }
             Text("Выберите клиента", style = MaterialTheme.typography.headlineSmall)
         }
-        OutlinedTextField(
+        RoundedSearchField(
             value = query,
             onValueChange = onQueryChange,
-            label = { Text("Поиск") },
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-            singleLine = true,
+            placeholder = "Поиск",
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 10.dp)
@@ -12471,6 +15282,9 @@ private fun formatAppointmentMillis(value: Long): String =
         .toLocalDateTime()
         .format(appointmentStorageFormatter)
 
+private fun formatAppointmentDateTime(value: LocalDateTime): String =
+    value.format(appointmentStorageFormatter)
+
 internal fun parseAppointmentDateTime(value: String): LocalDateTime? =
     appointmentStorageInputFormatters.firstNotNullOfOrNull { formatter ->
         runCatching { LocalDateTime.parse(value.trim(), formatter) }.getOrNull()
@@ -12532,6 +15346,57 @@ private fun financeDateDisplay(value: String): String =
 private fun isInFinanceMonth(date: LocalDate?, selectedMonth: LocalDate): Boolean =
     date != null && date.year == selectedMonth.year && date.month == selectedMonth.month
 
+private fun financePeriodRange(mode: FinancePeriodMode, anchorDate: LocalDate): Pair<LocalDate, LocalDate> =
+    when (mode) {
+        FinancePeriodMode.Week -> {
+            val start = anchorDate.startOfWeek()
+            start to start.plusDays(6)
+        }
+        FinancePeriodMode.Month -> {
+            val start = anchorDate.withDayOfMonth(1)
+            start to start.withDayOfMonth(start.lengthOfMonth())
+        }
+        FinancePeriodMode.Year -> LocalDate.of(anchorDate.year, 1, 1) to LocalDate.of(anchorDate.year, 12, 31)
+    }
+
+private fun financePeriodTitle(mode: FinancePeriodMode, anchorDate: LocalDate): String =
+    when (mode) {
+        FinancePeriodMode.Week -> {
+            val range = financePeriodRange(mode, anchorDate)
+            financeRangeTitle(range.first, range.second)
+        }
+        FinancePeriodMode.Month -> anchorDate
+            .withDayOfMonth(1)
+            .format(monthTitleFormatter)
+            .replaceFirstChar { it.titlecase(ruLocale) }
+        FinancePeriodMode.Year -> "${anchorDate.year} год"
+    }
+
+private fun financeRangeTitle(startDate: LocalDate, endDate: LocalDate): String =
+    when {
+        startDate == endDate -> startDate.format(dayMonthFormatter)
+        startDate.year == endDate.year && startDate.month == endDate.month ->
+            "${startDate.dayOfMonth} - ${endDate.format(dayMonthFormatter)}"
+        startDate.year == endDate.year ->
+            "${startDate.format(dayMonthFormatter)} - ${endDate.format(dayMonthFormatter)}"
+        else ->
+            "${startDate.format(dayMonthYearFormatter)} - ${endDate.format(dayMonthYearFormatter)}"
+    }
+
+private fun financeAppointmentCountTitle(mode: FinancePeriodMode): String =
+    when (mode) {
+        FinancePeriodMode.Week -> "Записи за неделю"
+        FinancePeriodMode.Month -> "Записи за месяц"
+        FinancePeriodMode.Year -> "Записи за год"
+    }
+
+private fun LocalDate.shiftFinancePeriod(mode: FinancePeriodMode, direction: Int): LocalDate =
+    when (mode) {
+        FinancePeriodMode.Week -> plusWeeks(direction.toLong())
+        FinancePeriodMode.Month -> plusMonths(direction.toLong())
+        FinancePeriodMode.Year -> plusYears(direction.toLong())
+    }
+
 private fun appointmentIsCancelled(appointment: AppointmentRow): Boolean =
     appointment.status == APPOINTMENT_STATUS_CANCELLED
 
@@ -12592,27 +15457,27 @@ private fun financeSummaryForMonth(
     transactions: List<FinanceTransactionEntity>,
     selectedMonth: LocalDate
 ): FinanceSummary {
-    val monthAppointments = appointmentIndex.parsed
-        .filter { isInFinanceMonth(it.start.toLocalDate(), selectedMonth) }
-        .map { it.appointment }
-    val accrued = monthAppointments.sumOf { appointmentBillableCents(it) }
-    val debt = monthAppointments.sumOf { appointmentRemainingCents(it) }
-    val appointmentPaid = appointmentIndex.appointments
-        .filter { it.paidAmountCents > 0 && isInFinanceMonth(parseFinanceLocalDate(it.paidAt), selectedMonth) }
-        .sumOf { it.paidAmountCents }
-    val manualIncome = transactions
-        .filter { it.type == FINANCE_TYPE_INCOME && isInFinanceMonth(parseFinanceLocalDate(it.date), selectedMonth) }
-        .sumOf { it.amountCents }
-    val expenses = transactions
-        .filter { it.type == FINANCE_TYPE_EXPENSE && isInFinanceMonth(parseFinanceLocalDate(it.date), selectedMonth) }
-        .sumOf { it.amountCents }
-    return FinanceSummary(
-        accruedCents = accrued,
-        paidCents = appointmentPaid + manualIncome,
-        debtCents = debt,
-        expenseCents = expenses
-    )
+    val range = financePeriodRange(FinancePeriodMode.Month, selectedMonth)
+    return financeSummaryForRange(appointmentIndex, transactions, range.first, range.second)
 }
+
+private fun financeAppointmentCountForMonth(
+    appointmentIndex: AppointmentIndex,
+    selectedMonth: LocalDate
+): Int {
+    val range = financePeriodRange(FinancePeriodMode.Month, selectedMonth)
+    return financeAppointmentCountForRange(appointmentIndex, range.first, range.second)
+}
+
+private fun financeAppointmentCountForRange(
+    appointmentIndex: AppointmentIndex,
+    startDate: LocalDate,
+    endDate: LocalDate
+): Int =
+    appointmentIndex.parsed.count {
+        isInFinanceRange(it.start.toLocalDate(), startDate, endDate) &&
+            !appointmentIsCancelled(it.appointment)
+    }
 
 private fun financeRangeForCalendarView(
     calendarView: AppointmentCalendarView,
@@ -12669,11 +15534,21 @@ private fun financeJournalForMonth(
     appointmentIndex: AppointmentIndex,
     transactions: List<FinanceTransactionEntity>,
     selectedMonth: LocalDate
+): List<FinanceJournalItem> {
+    val range = financePeriodRange(FinancePeriodMode.Month, selectedMonth)
+    return financeJournalForRange(appointmentIndex, transactions, range.first, range.second)
+}
+
+private fun financeJournalForRange(
+    appointmentIndex: AppointmentIndex,
+    transactions: List<FinanceTransactionEntity>,
+    startDate: LocalDate,
+    endDate: LocalDate
 ): List<FinanceJournalItem> = buildList {
     appointmentIndex.parsed.forEach { parsedAppointment ->
         val appointment = parsedAppointment.appointment
         val appointmentDate = parsedAppointment.start.toLocalDate()
-        if (appointment.priceCents > 0 && appointment.paidAmountCents > 0 && isInFinanceMonth(parseFinanceLocalDate(appointment.paidAt), selectedMonth)) {
+        if (appointment.priceCents > 0 && appointment.paidAmountCents > 0 && isInFinanceRange(parseFinanceLocalDate(appointment.paidAt), startDate, endDate)) {
             add(
                 FinanceJournalItem(
                     key = "appointment-paid-${appointment.id}",
@@ -12687,7 +15562,7 @@ private fun financeJournalForMonth(
             )
         }
         val remaining = appointmentRemainingCents(appointment)
-        if (appointmentBillableCents(appointment) > 0 && remaining > 0 && isInFinanceMonth(appointmentDate, selectedMonth)) {
+        if (appointmentBillableCents(appointment) > 0 && remaining > 0 && isInFinanceRange(appointmentDate, startDate, endDate)) {
             add(
                 FinanceJournalItem(
                     key = "appointment-debt-${appointment.id}",
@@ -12703,7 +15578,7 @@ private fun financeJournalForMonth(
         }
     }
     transactions.forEach { transaction ->
-        if (isInFinanceMonth(parseFinanceLocalDate(transaction.date), selectedMonth)) {
+        if (isInFinanceRange(parseFinanceLocalDate(transaction.date), startDate, endDate)) {
             add(
                 FinanceJournalItem(
                     key = "transaction-${transaction.id}",
@@ -12711,7 +15586,8 @@ private fun financeJournalForMonth(
                     title = transaction.title,
                     subtitle = listOf(transaction.category, transaction.paymentMethod).filter { it.isNotBlank() }.joinToString(" · "),
                     amountCents = transaction.amountCents,
-                    date = transaction.date
+                    date = transaction.date,
+                    transaction = transaction
                 )
             )
         }
@@ -12770,6 +15646,17 @@ private fun calendarPeriodTitle(calendarView: AppointmentCalendarView, selectedD
 private fun formatAppointmentDateForUi(date: LocalDate): String =
     date.format(DateTimeFormatter.ofPattern("d MMM yyyy", ruLocale))
 
+private fun dayOffPeriodLabel(startDate: LocalDate, endDate: LocalDate): String =
+    when {
+        startDate == endDate -> formatAppointmentDateForUi(startDate)
+        startDate.year == endDate.year && startDate.month == endDate.month ->
+            "${startDate.dayOfMonth} - ${endDate.format(DateTimeFormatter.ofPattern("d MMM yyyy", ruLocale))}"
+        startDate.year == endDate.year ->
+            "${startDate.format(dayMonthFormatter)} - ${endDate.format(dayMonthYearFormatter)}"
+        else ->
+            "${startDate.format(dayMonthYearFormatter)} - ${endDate.format(dayMonthYearFormatter)}"
+    }
+
 private fun appointmentTimeOnly(appointment: AppointmentRow): String =
     parseAppointmentDateTime(appointment.startAt)?.toLocalTime()?.toString() ?: appointment.startAt
 
@@ -12777,6 +15664,60 @@ private fun appointmentTimeRange(appointment: AppointmentRow): String {
     val start = parseAppointmentDateTime(appointment.startAt) ?: return appointment.startAt
     val end = start.plusMinutes(appointment.durationMinutes.coerceAtLeast(15).toLong())
     return "${start.toLocalTime()}-${end.toLocalTime()}"
+}
+
+private fun dayOffTimeOnly(dayOff: DayOffEntity): String =
+    parseAppointmentDateTime(dayOff.startAt)?.toLocalTime()?.toString() ?: dayOff.startAt
+
+private fun dayOffTimeRange(dayOff: DayOffEntity): String {
+    val start = parseAppointmentDateTime(dayOff.startAt) ?: return dayOff.startAt
+    val end = parseAppointmentDateTime(dayOff.endAt) ?: return dayOff.endAt
+    return if (start.toLocalDate() == end.toLocalDate()) {
+        "${start.toLocalTime()}-${end.toLocalTime()}"
+    } else {
+        "${start.format(dayMonthTimeFormatter)} - ${end.format(dayMonthTimeFormatter)}"
+    }
+}
+
+private fun dayOffRangeLabel(startAt: String, endAt: String): String {
+    val start = parseAppointmentDateTime(startAt) ?: return "$startAt - $endAt"
+    val end = parseAppointmentDateTime(endAt) ?: return "$startAt - $endAt"
+    return if (start.toLocalDate() == end.toLocalDate()) {
+        "${start.toLocalDate().format(dayMonthFormatter)} ${start.toLocalTime()}-${end.toLocalTime()}"
+    } else {
+        "${start.format(dayMonthTimeFormatter)} - ${end.format(dayMonthTimeFormatter)}"
+    }
+}
+
+private fun formatDayOffDateForDetail(dayOff: DayOffEntity): String {
+    val start = parseAppointmentDateTime(dayOff.startAt) ?: return dayOff.startAt
+    val end = parseAppointmentDateTime(dayOff.endAt) ?: return dayOff.endAt
+    val dateFormatter = DateTimeFormatter.ofPattern("d MMMM yyyy, EEEE", ruLocale)
+    return if (start.toLocalDate() == end.toLocalDate()) {
+        start.toLocalDate().format(dateFormatter)
+    } else {
+        "${start.toLocalDate().format(dateFormatter)} - ${end.toLocalDate().format(dateFormatter)}"
+    }
+}
+
+private fun dayOffCalendarStatusLabel(dayOff: DayOffEntity, hasCalendarPermissions: Boolean): String = when {
+    dayOff.calendarEventId > 0 &&
+        timestampMillis(dayOff.calendarSyncedAt) >= timestampMillis(dayOff.updatedAt) -> "связан"
+    dayOff.calendarEventId > 0 -> "нужно обновить календарь"
+    !hasCalendarPermissions -> "нужно разрешение"
+    else -> "не связан"
+}
+
+private fun dayOffRangeIsValid(startAt: String, endAt: String): Boolean {
+    val start = parseAppointmentDateTime(startAt) ?: return false
+    val end = parseAppointmentDateTime(endAt) ?: return false
+    return end.isAfter(start)
+}
+
+private fun dayOffDurationMinutes(startAt: String, endAt: String): Int {
+    val start = parseAppointmentDateTime(startAt) ?: return 0
+    val end = parseAppointmentDateTime(endAt) ?: return 0
+    return java.time.Duration.between(start, end).toMinutes().toInt().coerceAtLeast(0)
 }
 
 private fun appointmentPeriodCountText(calendarView: AppointmentCalendarView, count: Int): String {
@@ -12788,6 +15729,9 @@ private fun appointmentPeriodCountText(calendarView: AppointmentCalendarView, co
     }
     return "$count ${appointmentCountWord(count)} $period"
 }
+
+private fun appointmentCountLabel(count: Int): String =
+    "$count ${appointmentCountWord(count)}"
 
 private fun appointmentCountWord(count: Int): String {
     val mod100 = count % 100
@@ -12819,6 +15763,178 @@ private fun findAppointmentConflict(
         }
         .minByOrNull { parseAppointmentMillis(it.startAt) ?: Long.MAX_VALUE }
 }
+
+private fun findAppointmentConflicts(
+    appointments: List<AppointmentRow>,
+    startAt: String,
+    endAt: String,
+    excludeAppointmentId: Long? = null
+): List<AppointmentRow> {
+    val start = parseAppointmentDateTime(startAt) ?: return emptyList()
+    val end = parseAppointmentDateTime(endAt) ?: return emptyList()
+    if (!end.isAfter(start)) return emptyList()
+    return appointments
+        .asSequence()
+        .filter { it.id != excludeAppointmentId }
+        .filter { !appointmentIsCancelled(it) }
+        .mapNotNull { appointment ->
+            val otherStart = parseAppointmentDateTime(appointment.startAt) ?: return@mapNotNull null
+            val otherEnd = otherStart.plusMinutes(appointment.durationMinutes.coerceAtLeast(15).toLong())
+            if (dateTimeRangesOverlap(start, end, otherStart, otherEnd)) appointment else null
+        }
+        .sortedBy { parseAppointmentMillis(it.startAt) ?: Long.MAX_VALUE }
+        .toList()
+}
+
+private fun appointmentRangeOverlapsDayOff(
+    appointmentStartAt: String,
+    appointmentDurationMinutes: Int,
+    dayOffStartAt: String,
+    dayOffEndAt: String
+): Boolean {
+    val appointmentStart = parseAppointmentDateTime(appointmentStartAt) ?: return false
+    val dayOffStart = parseAppointmentDateTime(dayOffStartAt) ?: return false
+    val dayOffEnd = parseAppointmentDateTime(dayOffEndAt) ?: return false
+    val appointmentEnd = appointmentStart.plusMinutes(appointmentDurationMinutes.coerceAtLeast(15).toLong())
+    return dateTimeRangesOverlap(appointmentStart, appointmentEnd, dayOffStart, dayOffEnd)
+}
+
+private fun findDayOffConflict(
+    dayOffs: List<DayOffEntity>,
+    startAt: String,
+    durationMinutes: Int,
+    excludeDayOffId: Long? = null
+): DayOffEntity? {
+    val start = parseAppointmentDateTime(startAt) ?: return null
+    val end = start.plusMinutes(durationMinutes.coerceAtLeast(15).toLong())
+    return findDayOffConflict(dayOffs, start, end, excludeDayOffId)
+}
+
+private fun findDayOffConflict(
+    dayOffs: List<DayOffEntity>,
+    startAt: String,
+    endAt: String,
+    excludeDayOffId: Long? = null
+): DayOffEntity? {
+    val start = parseAppointmentDateTime(startAt) ?: return null
+    val end = parseAppointmentDateTime(endAt) ?: return null
+    return findDayOffConflict(dayOffs, start, end, excludeDayOffId)
+}
+
+private fun findDayOffConflict(
+    dayOffs: List<DayOffEntity>,
+    start: LocalDateTime,
+    end: LocalDateTime,
+    excludeDayOffId: Long? = null
+): DayOffEntity? {
+    if (!end.isAfter(start)) return null
+    return dayOffs
+        .asSequence()
+        .filter { it.id != excludeDayOffId }
+        .mapNotNull { dayOff ->
+            val otherStart = parseAppointmentDateTime(dayOff.startAt) ?: return@mapNotNull null
+            val otherEnd = parseAppointmentDateTime(dayOff.endAt) ?: return@mapNotNull null
+            if (start < otherEnd && end > otherStart) dayOff else null
+        }
+        .minByOrNull { parseAppointmentMillis(it.startAt) ?: Long.MAX_VALUE }
+}
+
+private fun analyzeDayOffOverlaps(
+    dayOffs: List<DayOffEntity>,
+    startAt: String,
+    endAt: String,
+    excludeDayOffId: Long? = null
+): DayOffOverlapAnalysis {
+    val start = parseAppointmentDateTime(startAt) ?: return DayOffOverlapAnalysis(emptyList(), emptyList())
+    val end = parseAppointmentDateTime(endAt) ?: return DayOffOverlapAnalysis(emptyList(), emptyList())
+    if (!end.isAfter(start)) return DayOffOverlapAnalysis(emptyList(), emptyList())
+    val covered = mutableListOf<DayOffEntity>()
+    val mergeRequired = mutableListOf<DayOffEntity>()
+    dayOffs
+        .asSequence()
+        .filter { it.id != excludeDayOffId }
+        .forEach { dayOff ->
+            val otherStart = parseAppointmentDateTime(dayOff.startAt) ?: return@forEach
+            val otherEnd = parseAppointmentDateTime(dayOff.endAt) ?: return@forEach
+            if (!end.isAfter(start) || !otherEnd.isAfter(otherStart)) return@forEach
+            if (!dayOffDateRangesOverlap(start, end, otherStart, otherEnd)) return@forEach
+            if (start <= otherStart && end >= otherEnd) {
+                covered += dayOff
+            } else {
+                mergeRequired += dayOff
+            }
+        }
+    return DayOffOverlapAnalysis(
+        covered = covered.sortedBy { parseAppointmentMillis(it.startAt) ?: Long.MAX_VALUE },
+        mergeRequired = mergeRequired.sortedBy { parseAppointmentMillis(it.startAt) ?: Long.MAX_VALUE }
+    )
+}
+
+private fun mergedDayOffRange(
+    startAt: String,
+    endAt: String,
+    dayOffs: List<DayOffEntity>
+): Pair<String, String> {
+    val starts = buildList {
+        parseAppointmentDateTime(startAt)?.let { add(it) }
+        dayOffs.forEach { dayOff -> parseAppointmentDateTime(dayOff.startAt)?.let { add(it) } }
+    }
+    val ends = buildList {
+        parseAppointmentDateTime(endAt)?.let { add(it) }
+        dayOffs.forEach { dayOff -> parseAppointmentDateTime(dayOff.endAt)?.let { add(it) } }
+    }
+    val mergedStart = starts.minOrNull() ?: parseAppointmentDateTime(startAt) ?: LocalDateTime.now()
+    val mergedEnd = ends.maxOrNull() ?: parseAppointmentDateTime(endAt) ?: mergedStart.plusHours(1)
+    return formatAppointmentDateTime(mergedStart) to formatAppointmentDateTime(mergedEnd)
+}
+
+private fun dayOffWeekSpan(dayOff: DayOffEntity, week: List<LocalDate>): DayOffWeekSpan? {
+    if (week.isEmpty()) return null
+    val start = parseAppointmentDateTime(dayOff.startAt) ?: return null
+    val end = parseAppointmentDateTime(dayOff.endAt) ?: return null
+    if (!end.isAfter(start)) return null
+    val eventStartDate = start.toLocalDate()
+    val eventEndDate = dayOffAffectedEndDate(end)
+    val weekStart = week.first()
+    val weekEnd = week.last()
+    if (eventStartDate.isAfter(weekEnd) || eventEndDate.isBefore(weekStart)) return null
+    val visibleStart = maxOf(eventStartDate, weekStart)
+    val visibleEnd = minOf(eventEndDate, weekEnd)
+    val first = week.indexOf(visibleStart).takeIf { it >= 0 } ?: return null
+    val last = week.indexOf(visibleEnd).takeIf { it >= 0 } ?: return null
+    return DayOffWeekSpan(
+        first = first,
+        last = last,
+        startsHere = visibleStart == eventStartDate,
+        endsHere = visibleEnd == eventEndDate
+    )
+}
+
+private fun dateTimeRangesOverlap(
+    start: LocalDateTime,
+    end: LocalDateTime,
+    otherStart: LocalDateTime,
+    otherEnd: LocalDateTime
+): Boolean =
+    start < otherEnd && end > otherStart
+
+private fun dayOffDateRangesOverlap(
+    start: LocalDateTime,
+    end: LocalDateTime,
+    otherStart: LocalDateTime,
+    otherEnd: LocalDateTime
+): Boolean {
+    val endDate = dayOffAffectedEndDate(end)
+    val otherEndDate = dayOffAffectedEndDate(otherEnd)
+    return !start.toLocalDate().isAfter(otherEndDate) && !otherStart.toLocalDate().isAfter(endDate)
+}
+
+private fun dayOffAffectedEndDate(end: LocalDateTime): LocalDate =
+    if (end.toLocalTime() == LocalTime.MIDNIGHT) {
+        end.toLocalDate().minusDays(1)
+    } else {
+        end.toLocalDate()
+    }
 
 private fun appointmentUiStatusLabel(appointment: AppointmentRow, now: LocalDateTime = LocalDateTime.now()): String {
     if (appointmentIsCancelled(appointment)) return APPOINTMENT_STATUS_CANCELLED
@@ -13345,6 +16461,18 @@ private fun AppointmentEntity.toMap() = mapOf(
     "updatedAt" to updatedAt
 )
 
+private fun DayOffEntity.toMap() = mapOf(
+    "id" to id,
+    "title" to title,
+    "startAt" to startAt,
+    "endAt" to endAt,
+    "notes" to notes,
+    "calendarEventId" to calendarEventId,
+    "calendarSyncedAt" to calendarSyncedAt,
+    "createdAt" to createdAt,
+    "updatedAt" to updatedAt
+)
+
 private fun ServiceEntity.toMap() = mapOf(
     "id" to id,
     "name" to name,
@@ -13489,6 +16617,29 @@ private fun JSONArray?.toAppointments(): List<AppointmentEntity> = buildList {
                 paymentMethod = item.optString("paymentMethod"),
                 paidAt = item.optString("paidAt"),
                 status = item.optString("status", "Запланирована"),
+                notes = item.optString("notes"),
+                calendarEventId = item.optLong("calendarEventId", 0),
+                calendarSyncedAt = item.optString("calendarSyncedAt"),
+                createdAt = item.optString("createdAt", now()),
+                updatedAt = item.optString("updatedAt", item.optString("createdAt", now()))
+            )
+        )
+    }
+}
+
+private fun JSONArray?.toDayOffs(): List<DayOffEntity> = buildList {
+    val array = this@toDayOffs ?: return@buildList
+    for (i in 0 until array.length()) {
+        val item = array.getJSONObject(i)
+        val startAt = item.optString("startAt").trim()
+        val endAt = item.optString("endAt").trim()
+        if (!dayOffRangeIsValid(startAt, endAt)) continue
+        add(
+            DayOffEntity(
+                id = item.optLong("id"),
+                title = item.optString("title", "Выходной").trim().ifBlank { "Выходной" },
+                startAt = startAt,
+                endAt = endAt,
                 notes = item.optString("notes"),
                 calendarEventId = item.optLong("calendarEventId", 0),
                 calendarSyncedAt = item.optString("calendarSyncedAt"),

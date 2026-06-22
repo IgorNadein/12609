@@ -22,8 +22,8 @@ android {
         applicationId "com.offlinebeautycrm"
         minSdk 26
         targetSdk 36
-        versionCode envVersionCode?.trim() ? envVersionCode.toInteger() : 3
-        versionName envVersionName?.trim() ? envVersionName : "0.3.0"
+        versionCode envVersionCode?.trim() ? envVersionCode.toInteger() : 4000
+        versionName envVersionName?.trim() ? envVersionName : "0.4.0"
     }
 
     buildFeatures {

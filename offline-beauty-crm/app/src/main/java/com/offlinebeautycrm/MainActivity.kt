@@ -369,6 +369,7 @@ private data class AppVersionInfo(
 private data class GitHubReleaseInfo(
     val tagName: String,
     val versionName: String,
+    val versionCode: Long?,
     val publishedAt: String,
     val body: String,
     val htmlUrl: String,
@@ -3439,12 +3440,7 @@ class AutomationNotificationReceiver : BroadcastReceiver() {
 private object GitHubUpdates {
     fun currentVersion(context: Context): AppVersionInfo {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            info.longVersionCode
-        } else {
-            @Suppress("DEPRECATION")
-            info.versionCode.toLong()
-        }
+        val versionCode = packageVersionCode(info)
         return AppVersionInfo(info.versionName.orEmpty().ifBlank { "0" }, versionCode)
     }
 
@@ -3456,7 +3452,9 @@ private object GitHubUpdates {
                 ?: return@withContext UpdateCheckState.Error(current, "Не удалось распознать текущую версию ${current.versionName}")
             val releaseParts = parseVersionParts(release.versionName)
                 ?: return@withContext UpdateCheckState.Error(current, "Не удалось распознать версию релиза ${release.tagName}")
-            if (compareVersionParts(releaseParts, currentParts) > 0) {
+            val hasNewerVersionName = compareVersionParts(releaseParts, currentParts) > 0
+            val hasNewerVersionCode = release.versionCode?.let { it > current.versionCode }
+            if (hasNewerVersionCode ?: hasNewerVersionName) {
                 UpdateCheckState.Available(current, release)
             } else {
                 UpdateCheckState.Current(current, release)
@@ -3489,6 +3487,7 @@ private object GitHubUpdates {
             connection.disconnect()
         }
         if (!target.exists() || target.length() <= 0L) error("APK скачан пустым файлом")
+        validateDownloadedApk(context, target)
         target
     }
 
@@ -3545,6 +3544,7 @@ private object GitHubUpdates {
         return GitHubReleaseInfo(
             tagName = tagName,
             versionName = tagName.removePrefix("v").removePrefix("V"),
+            versionCode = parseReleaseVersionCode(json.optString("body")),
             publishedAt = json.optString("published_at").trim(),
             body = json.optString("body").trim(),
             htmlUrl = json.optString("html_url").trim(),
@@ -3569,6 +3569,36 @@ private object GitHubUpdates {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun validateDownloadedApk(context: Context, apkFile: File) {
+        val apkInfo = context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+            ?: error("Не удалось прочитать скачанный APK")
+        if (apkInfo.packageName != context.packageName) {
+            error("APK относится к другому приложению: ${apkInfo.packageName}")
+        }
+        val apkVersionCode = packageVersionCode(apkInfo)
+        val currentVersion = currentVersion(context)
+        if (apkVersionCode <= currentVersion.versionCode) {
+            error("В APK versionCode $apkVersionCode, а установлено ${currentVersion.versionCode}. Нужен более новый релиз.")
+        }
+    }
+
+    private fun packageVersionCode(info: android.content.pm.PackageInfo): Long {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+    }
+
+    private fun parseReleaseVersionCode(body: String): Long? {
+        return Regex("""(?im)^\s*Version code:\s*(\d+)\s*$""")
+            .find(body)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toLongOrNull()
     }
 }
 
@@ -14502,7 +14532,7 @@ private fun UpdatesSettingsSection() {
                         } catch (e: ActivityNotFoundException) {
                             downloadMessage = "Не удалось открыть системный установщик APK"
                         } catch (e: Exception) {
-                            downloadMessage = "Не удалось скачать обновление: ${e.message ?: "ошибка"}"
+                            downloadMessage = "Не удалось скачать или установить обновление: ${e.message ?: "ошибка"}"
                         } finally {
                             isDownloading = false
                         }

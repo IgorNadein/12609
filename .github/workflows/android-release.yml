@@ -38,8 +38,11 @@ jobs:
             echo "::error::Could not read base versionName"
             exit 1
           fi
+          major="$(echo "$base_version" | cut -d. -f1)"
+          minor="$(echo "$base_version" | cut -d. -f2)"
+          patch="$(echo "$base_version" | cut -d. -f3)"
           version_name="${base_version}-${GITHUB_RUN_NUMBER}"
-          version_code=$((3000 + GITHUB_RUN_NUMBER))
+          version_code=$((major * 1000000 + minor * 10000 + patch * 1000 + GITHUB_RUN_NUMBER))
           echo "RELEASE_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=v$version_name" >> "$GITHUB_ENV"

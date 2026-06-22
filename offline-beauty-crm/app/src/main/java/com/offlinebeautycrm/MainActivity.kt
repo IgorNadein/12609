@@ -16,6 +16,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -34,12 +35,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -57,6 +63,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -139,13 +146,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -155,6 +169,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
@@ -6214,12 +6231,9 @@ private fun AppointmentsScreen(
 
     var calendarView by rememberSaveable { mutableStateOf(AppointmentCalendarView.Month) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
-    var searchActive by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
 
     var showCreateSheet by remember { mutableStateOf(false) }
     var showClientPicker by remember { mutableStateOf(false) }
-    var showCalendarDatePicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
     var showTimePicker by remember { mutableStateOf(false) }
     var serviceCreatorTargetId by remember { mutableStateOf<Int?>(null) }
@@ -6406,9 +6420,7 @@ private fun AppointmentsScreen(
         resetDraft()
     }
 
-    val visibleAppointments = remember(appointments, searchQuery) {
-        appointments.filter { it.matchesAppointmentSearch(searchQuery) }
-    }
+    val visibleAppointments = appointments
     val selectedAppointment = remember(selectedAppointmentId, appointments) {
         selectedAppointmentId?.let { id -> appointments.firstOrNull { it.id == id } }
     }
@@ -6462,24 +6474,11 @@ private fun AppointmentsScreen(
             AppointmentsCalendarHeader(
                 calendarView = calendarView,
                 selectedDate = selectedDate,
-                searchActive = searchActive,
-                searchQuery = searchQuery,
-                onSearchActiveChange = {
-                    searchActive = it
-                    if (!it) searchQuery = ""
-                },
-                onSearchQueryChange = { searchQuery = it },
-                onToday = {
-                    selectedDate = LocalDate.now()
-                },
                 onPreviousPeriod = {
                     selectedDate = selectedDate.shiftCalendarPeriod(calendarView, -1)
                 },
                 onNextPeriod = {
                     selectedDate = selectedDate.shiftCalendarPeriod(calendarView, 1)
-                },
-                onPickDate = {
-                    showCalendarDatePicker = true
                 },
                 onViewChange = { calendarView = it }
             )
@@ -6503,11 +6502,14 @@ private fun AppointmentsScreen(
                     AppointmentCalendarView.Month -> AppointmentMonthView(
                         selectedDate = selectedDate,
                         appointments = visibleAppointments,
-                        hasCalendarPermissions = hasCalendarPermissions,
-                        onAppointmentClick = { openMonthDayPreview(it) },
-                        onDayClick = {
+                        onExpandedAppointmentClick = { openMonthDayPreview(it) },
+                        onCollapsedAppointmentClick = { openAppointmentDetails(it) },
+                        onExpandedDayClick = {
                             selectedDate = it
                             calendarView = AppointmentCalendarView.Day
+                        },
+                        onCollapsedDayClick = {
+                            selectedDate = it
                         }
                     )
                 }
@@ -6753,28 +6755,6 @@ private fun AppointmentsScreen(
         }
     }
 
-    if (showCalendarDatePicker) {
-        val pickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDate.toPickerMillis())
-        DatePickerDialog(
-            onDismissRequest = { showCalendarDatePicker = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        pickerState.selectedDateMillis?.let {
-                            selectedDate = pickerMillisToLocalDate(it)
-                        }
-                        showCalendarDatePicker = false
-                    }
-                ) { Text("ОК") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCalendarDatePicker = false }) { Text("Отмена") }
-            }
-        ) {
-            DatePicker(state = pickerState)
-        }
-    }
-
     if (showDatePicker) {
         val pickerState = rememberDatePickerState(initialSelectedDateMillis = appointmentDate.toPickerMillis())
         DatePickerDialog(
@@ -6834,14 +6814,8 @@ private fun AppointmentsScreen(
 private fun AppointmentsCalendarHeader(
     calendarView: AppointmentCalendarView,
     selectedDate: LocalDate,
-    searchActive: Boolean,
-    searchQuery: String,
-    onSearchActiveChange: (Boolean) -> Unit,
-    onSearchQueryChange: (String) -> Unit,
-    onToday: () -> Unit,
     onPreviousPeriod: () -> Unit,
     onNextPeriod: () -> Unit,
-    onPickDate: () -> Unit,
     onViewChange: (AppointmentCalendarView) -> Unit
 ) {
     var viewMenuExpanded by remember { mutableStateOf(false) }
@@ -6886,35 +6860,6 @@ private fun AppointmentsCalendarHeader(
                 IconButton(onClick = onNextPeriod) {
                     Icon(Icons.Filled.ChevronRight, contentDescription = "Следующий период")
                 }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onToday) {
-                    Text("Сегодня")
-                }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { onSearchActiveChange(!searchActive) }) {
-                    Icon(Icons.Filled.Search, contentDescription = "Поиск")
-                }
-                IconButton(onClick = onPickDate) {
-                    Icon(Icons.Filled.DateRange, contentDescription = "Выбрать дату")
-                }
-            }
-            if (searchActive) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = onSearchQueryChange,
-                    label = { Text("Поиск записей") },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (searchQuery.isNotBlank()) {
-                            IconButton(onClick = { onSearchQueryChange("") }) {
-                                Icon(Icons.Filled.Close, contentDescription = "Очистить")
-                            }
-                        }
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
         }
     }
@@ -7249,59 +7194,643 @@ private fun AppointmentMonthDaySheet(
 private fun AppointmentMonthView(
     selectedDate: LocalDate,
     appointments: List<AppointmentRow>,
-    hasCalendarPermissions: Boolean,
-    onAppointmentClick: (AppointmentRow) -> Unit,
-    onDayClick: (LocalDate) -> Unit
+    onExpandedAppointmentClick: (AppointmentRow) -> Unit,
+    onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
+    onExpandedDayClick: (LocalDate) -> Unit,
+    onCollapsedDayClick: (LocalDate) -> Unit
 ) {
     val firstDay = selectedDate.withDayOfMonth(1)
     val gridStart = firstDay.minusDays((firstDay.dayOfWeek.value - 1).toLong())
-    val days = (0 until 42).map { gridStart.plusDays(it.toLong()) }
-    Column(
+    val days = remember(selectedDate.year, selectedDate.month) {
+        val needsSixthWeek = (35 until 42).any {
+            gridStart.plusDays(it.toLong()).month == selectedDate.month
+        }
+        val visibleDayCount = if (needsSixthWeek) 42 else 35
+        (0 until visibleDayCount).map { gridStart.plusDays(it.toLong()) }
+    }
+    val weeks = remember(days) { days.chunked(7) }
+    val appointmentsByDate = remember(appointments) {
+        appointments
+            .mapNotNull { appointment ->
+                parseAppointmentDateTime(appointment.startAt)
+                    ?.let { start -> appointment to start }
+            }
+            .groupBy { it.second.toLocalDate() }
+            .mapValues { entry ->
+                entry.value
+                    .sortedBy { it.second.toLocalTime() }
+                    .map { it.first }
+            }
+    }
+    val selectedDayAppointments = remember(selectedDate, appointmentsByDate) {
+        appointmentsByDate[selectedDate].orEmpty()
+    }
+    val collapsedListState = rememberLazyListState()
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    if (isLandscape) {
+        AppointmentMonthLandscapeContent(
+            selectedDate = selectedDate,
+            selectedDayAppointments = selectedDayAppointments,
+            weeks = weeks,
+            appointmentsByDate = appointmentsByDate,
+            listState = collapsedListState,
+            onAppointmentClick = onCollapsedAppointmentClick,
+            onDayClick = onCollapsedDayClick
+        )
+        return
+    }
+    val density = LocalDensity.current
+    val collapseThresholdPx = with(density) { 56.dp.toPx() }
+    var isCollapsed by rememberSaveable { mutableStateOf(false) }
+    var gestureDistance by remember { mutableStateOf(0f) }
+    val collapseProgress by animateFloatAsState(
+        targetValue = if (isCollapsed) 1f else 0f,
+        animationSpec = tween(durationMillis = 340, easing = FastOutSlowInEasing),
+        label = "Month collapse progress"
+    )
+    fun collapsedListAtTop(): Boolean =
+        collapsedListState.firstVisibleItemIndex == 0 &&
+            collapsedListState.firstVisibleItemScrollOffset == 0
+
+    val monthCollapseConnection = remember(isCollapsed, collapseThresholdPx, collapsedListState) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (!isCollapsed && available.y < 0f) {
+                    gestureDistance += -available.y
+                    if (gestureDistance >= collapseThresholdPx) {
+                        isCollapsed = true
+                        gestureDistance = 0f
+                    }
+                } else if (
+                    isCollapsed &&
+                    available.y > 0f &&
+                    collapsedListAtTop()
+                ) {
+                    gestureDistance += available.y
+                    if (gestureDistance >= collapseThresholdPx) {
+                        isCollapsed = false
+                        gestureDistance = 0f
+                    }
+                } else {
+                    gestureDistance = 0f
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .nestedScroll(monthCollapseConnection)
+            .pointerInput(isCollapsed, collapseThresholdPx) {
+                detectVerticalDragGestures(
+                    onDragEnd = { gestureDistance = 0f },
+                    onDragCancel = { gestureDistance = 0f },
+                    onVerticalDrag = { change, dragAmount ->
+                        when {
+                            !isCollapsed && dragAmount < 0f -> {
+                                gestureDistance += -dragAmount
+                                change.consume()
+                                if (gestureDistance >= collapseThresholdPx) {
+                                    isCollapsed = true
+                                    gestureDistance = 0f
+                                }
+                            }
+                            isCollapsed && dragAmount > 0f && collapsedListAtTop() -> {
+                                gestureDistance += dragAmount
+                                change.consume()
+                                if (gestureDistance >= collapseThresholdPx) {
+                                    isCollapsed = false
+                                    gestureDistance = 0f
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+    ) {
+        AppointmentMonthPortraitMorphContent(
+            selectedDate = selectedDate,
+            selectedDayAppointments = selectedDayAppointments,
+            weeks = weeks,
+            appointmentsByDate = appointmentsByDate,
+            listState = collapsedListState,
+            collapseProgress = collapseProgress,
+            isCollapsed = isCollapsed,
+            onExpandedAppointmentClick = onExpandedAppointmentClick,
+            onCollapsedAppointmentClick = onCollapsedAppointmentClick,
+            onExpandedDayClick = onExpandedDayClick,
+            onCollapsedDayClick = onCollapsedDayClick,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+@Composable
+private fun AppointmentMonthLandscapeContent(
+    selectedDate: LocalDate,
+    selectedDayAppointments: List<AppointmentRow>,
+    weeks: List<List<LocalDate>>,
+    appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayClick: (LocalDate) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(0.95f)
+                .fillMaxHeight()
+        ) {
+            AppointmentMonthWeekHeader()
+            Spacer(Modifier.height(4.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                weeks.forEach { week ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        week.forEach { day ->
+                            AppointmentMonthLandscapeDayCell(
+                                day = day,
+                                selectedDate = selectedDate,
+                                selectedMonth = selectedDate.month,
+                                appointments = appointmentsByDate[day].orEmpty(),
+                                onClick = { onDayClick(day) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+        )
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1.05f)
+                .fillMaxHeight(),
+            contentPadding = PaddingValues(bottom = 80.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            item {
+                AppointmentMonthSelectedDayHeader(
+                    date = selectedDate,
+                    appointmentCount = selectedDayAppointments.size
+                )
+            }
+            if (selectedDayAppointments.isEmpty()) {
+                item {
+                    Text(
+                        "На этот день записей нет",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 18.dp)
+                    )
+                }
+            } else {
+                items(selectedDayAppointments, key = { it.id }) { appointment ->
+                    AppointmentMonthAgendaRow(
+                        appointment = appointment,
+                        onClick = onAppointmentClick
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthPortraitMorphContent(
+    selectedDate: LocalDate,
+    selectedDayAppointments: List<AppointmentRow>,
+    weeks: List<List<LocalDate>>,
+    appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    collapseProgress: Float,
+    isCollapsed: Boolean,
+    onExpandedAppointmentClick: (AppointmentRow) -> Unit,
+    onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
+    onExpandedDayClick: (LocalDate) -> Unit,
+    onCollapsedDayClick: (LocalDate) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val progress = collapseProgress.coerceIn(0f, 1f)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
             .padding(horizontal = 6.dp, vertical = 8.dp)
     ) {
-        Row(Modifier.fillMaxWidth()) {
-            (1..7).map { java.time.DayOfWeek.of(it) }.forEach { day ->
-                Text(
-                    day.getDisplayName(java.time.format.TextStyle.SHORT, ruLocale),
-                    style = MaterialTheme.typography.labelMedium,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
+        AppointmentMonthWeekHeader()
+        Spacer(Modifier.height(6.dp))
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            val weekCount = weeks.size.coerceAtLeast(1)
+            val compactRowHeight = maxWidth / 7f
+            val compactGridHeight = compactRowHeight * weekCount
+            val targetGridHeight = if (compactGridHeight.value > maxHeight.value) maxHeight else compactGridHeight
+            val gridHeight = lerpDp(maxHeight, targetGridHeight, progress)
+            Column(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(gridHeight)
+                ) {
+                    weeks.forEach { week ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            week.forEach { day ->
+                                AppointmentMonthMorphDayCell(
+                                    day = day,
+                                    selectedDate = selectedDate,
+                                    selectedMonth = selectedDate.month,
+                                    appointments = appointmentsByDate[day].orEmpty(),
+                                    collapseProgress = progress,
+                                    appointmentClicksEnabled = !isCollapsed,
+                                    onAppointmentClick = onExpandedAppointmentClick,
+                                    onDateClick = {
+                                        if (isCollapsed) onCollapsedDayClick(day) else onExpandedDayClick(day)
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(lerpDp(0.dp, 12.dp, progress)))
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .graphicsLayer {
+                            alpha = progress
+                            translationY = 22f * (1f - progress)
+                        },
+                    contentPadding = PaddingValues(bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    item {
+                        AppointmentMonthSelectedDayHeader(
+                            date = selectedDate,
+                            appointmentCount = selectedDayAppointments.size
+                        )
+                    }
+                    if (selectedDayAppointments.isEmpty()) {
+                        item {
+                            Text(
+                                "На этот день записей нет",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 18.dp)
+                            )
+                        }
+                    } else {
+                        items(selectedDayAppointments, key = { it.id }) { appointment ->
+                            AppointmentMonthAgendaRow(
+                                appointment = appointment,
+                                onClick = onCollapsedAppointmentClick
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthMorphDayCell(
+    day: LocalDate,
+    selectedDate: LocalDate,
+    selectedMonth: java.time.Month,
+    appointments: List<AppointmentRow>,
+    collapseProgress: Float,
+    appointmentClicksEnabled: Boolean,
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onDateClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val progress = collapseProgress.coerceIn(0f, 1f)
+    val isToday = day == LocalDate.now()
+    val isSelected = day == selectedDate
+    val inMonth = day.month == selectedMonth
+    val expandedBackground = if (isToday) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (inMonth) 0.22f else 0.10f)
+    }
+    val collapsedBackground = when {
+        isSelected -> MaterialTheme.colorScheme.primaryContainer
+        isToday -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (inMonth) 0.22f else 0.10f)
+    }
+    val expandedTextColor = if (inMonth) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val collapsedTextColor = when {
+        isSelected -> MaterialTheme.colorScheme.onPrimaryContainer
+        inMonth -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+    }
+    Surface(
+        color = lerp(expandedBackground, collapsedBackground, progress),
+        shape = RoundedCornerShape(8.dp),
+        border = if (isSelected && progress > 0.01f) {
+            BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = progress))
+        } else {
+            null
+        },
+        modifier = modifier
+            .padding(2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onDateClick)
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 4.dp)
+        ) {
+            val density = LocalDensity.current
+            val numberShiftPx = with(density) { maxWidth.toPx() * 0.34f * progress }
+            Text(
+                day.dayOfMonth.toString(),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (isToday || (isSelected && progress > 0.5f)) FontWeight.Bold else FontWeight.Normal,
+                color = lerp(expandedTextColor, collapsedTextColor, progress),
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .graphicsLayer {
+                        translationX = numberShiftPx
+                        translationY = -2f * progress
+                    }
+            )
+            if (appointmentClicksEnabled || progress < 0.98f) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .fillMaxWidth()
+                        .padding(top = 22.dp)
+                        .graphicsLayer {
+                            alpha = 1f - progress
+                            translationY = -10f * progress
+                            scaleX = 1f - 0.08f * progress
+                        },
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    appointments.take(3).forEach { appointment ->
+                        val isCancelled = appointment.status == APPOINTMENT_STATUS_CANCELLED
+                        Surface(
+                            color = when {
+                                isCancelled -> MaterialTheme.colorScheme.errorContainer
+                                appointment.calendarEventId > 0 -> MaterialTheme.colorScheme.tertiaryContainer
+                                else -> MaterialTheme.colorScheme.primaryContainer
+                            },
+                            contentColor = when {
+                                isCancelled -> MaterialTheme.colorScheme.onErrorContainer
+                                appointment.calendarEventId > 0 -> MaterialTheme.colorScheme.onTertiaryContainer
+                                else -> MaterialTheme.colorScheme.onPrimaryContainer
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(16.dp)
+                                .clip(RoundedCornerShape(50))
+                                .clickable(enabled = appointmentClicksEnabled) { onAppointmentClick(appointment) }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    "${appointmentTimeOnly(appointment)} ${if (isCancelled) "Отменена: " else ""}${appointment.service}",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 11.sp,
+                                        lineHeight = 11.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                    if (appointments.size > 3) {
+                        Text(
+                            "+${appointments.size - 3}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 11.sp),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        alpha = progress
+                        translationY = 8f * (1f - progress)
+                    },
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                appointments.take(4).forEach { appointment ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.82f)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(appointmentMonthAccentColor(appointment))
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
+            }
+            if (!appointmentClicksEnabled && progress > 0.98f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(onClick = onDateClick)
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun AppointmentMonthExpandedContent(
+    selectedDate: LocalDate,
+    days: List<LocalDate>,
+    appointments: List<AppointmentRow>,
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayClick: (LocalDate) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 6.dp, vertical = 8.dp)
+    ) {
+        AppointmentMonthWeekHeader()
+        Spacer(Modifier.height(6.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            days.chunked(7).forEach { week ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    week.forEach { day ->
+                        val dayAppointments = appointments
+                            .filter { parseAppointmentDateTime(it.startAt)?.toLocalDate() == day }
+                            .sortedBy { parseAppointmentDateTime(it.startAt)?.toLocalTime() }
+                        AppointmentMonthExpandedDayCell(
+                            day = day,
+                            selectedMonth = selectedDate.month,
+                            appointments = dayAppointments,
+                            onAppointmentClick = onAppointmentClick,
+                            onClick = { onDayClick(day) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthCollapsedContent(
+    selectedDate: LocalDate,
+    selectedDayAppointments: List<AppointmentRow>,
+    days: List<LocalDate>,
+    appointments: List<AppointmentRow>,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onDayClick: (LocalDate) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 6.dp, vertical = 8.dp)
+    ) {
+        AppointmentMonthWeekHeader()
         Spacer(Modifier.height(6.dp))
         days.chunked(7).forEach { week ->
             Row(Modifier.fillMaxWidth()) {
                 week.forEach { day ->
-                    val dayAppointments = appointments.filter {
-                        parseAppointmentDateTime(it.startAt)?.toLocalDate() == day
-                    }
-                    AppointmentMonthDayCell(
+                    val dayAppointments = appointments
+                        .filter { parseAppointmentDateTime(it.startAt)?.toLocalDate() == day }
+                        .sortedBy { parseAppointmentDateTime(it.startAt)?.toLocalTime() }
+                    AppointmentMonthCollapsedDayCell(
                         day = day,
+                        selectedDate = selectedDate,
                         selectedMonth = selectedDate.month,
                         appointments = dayAppointments,
-                        hasCalendarPermissions = hasCalendarPermissions,
-                        onAppointmentClick = onAppointmentClick,
                         onClick = { onDayClick(day) },
                         modifier = Modifier.weight(1f)
                     )
                 }
             }
         }
-        Spacer(Modifier.height(96.dp))
+        Spacer(Modifier.height(12.dp))
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            item {
+                AppointmentMonthSelectedDayHeader(
+                    date = selectedDate,
+                    appointmentCount = selectedDayAppointments.size
+                )
+            }
+            if (selectedDayAppointments.isEmpty()) {
+                item {
+                    Text(
+                        "На этот день записей нет",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 18.dp)
+                    )
+                }
+            } else {
+                items(selectedDayAppointments, key = { it.id }) { appointment ->
+                    AppointmentMonthAgendaRow(
+                        appointment = appointment,
+                        onClick = onAppointmentClick
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun AppointmentMonthDayCell(
+private fun AppointmentMonthWeekHeader() {
+    Row(Modifier.fillMaxWidth()) {
+        (1..7).map { java.time.DayOfWeek.of(it) }.forEach { day ->
+            Text(
+                day.getDisplayName(java.time.format.TextStyle.SHORT, ruLocale),
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthExpandedDayCell(
     day: LocalDate,
     selectedMonth: java.time.Month,
     appointments: List<AppointmentRow>,
-    hasCalendarPermissions: Boolean,
     onAppointmentClick: (AppointmentRow) -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -7315,7 +7844,6 @@ private fun AppointmentMonthDayCell(
     }
     Column(
         modifier = modifier
-            .height(108.dp)
             .padding(2.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(background)
@@ -7376,6 +7904,225 @@ private fun AppointmentMonthDayCell(
         }
     }
 }
+
+@Composable
+private fun AppointmentMonthCollapsedDayCell(
+    day: LocalDate,
+    selectedDate: LocalDate,
+    selectedMonth: java.time.Month,
+    appointments: List<AppointmentRow>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isToday = day == LocalDate.now()
+    val isSelected = day == selectedDate
+    val inMonth = day.month == selectedMonth
+    val background = when {
+        isSelected -> MaterialTheme.colorScheme.primaryContainer
+        isToday -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (inMonth) 0.22f else 0.10f)
+    }
+    Surface(
+        color = background,
+        shape = RoundedCornerShape(8.dp),
+        border = if (isSelected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = modifier
+            .aspectRatio(1f)
+            .padding(2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                day.dayOfMonth.toString(),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (isToday || isSelected) FontWeight.Bold else FontWeight.Normal,
+                color = when {
+                    isSelected -> MaterialTheme.colorScheme.onPrimaryContainer
+                    inMonth -> MaterialTheme.colorScheme.onSurface
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                },
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            appointments.take(4).forEach { appointment ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.82f)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(appointmentMonthAccentColor(appointment))
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthLandscapeDayCell(
+    day: LocalDate,
+    selectedDate: LocalDate,
+    selectedMonth: java.time.Month,
+    appointments: List<AppointmentRow>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isToday = day == LocalDate.now()
+    val isSelected = day == selectedDate
+    val inMonth = day.month == selectedMonth
+    val background = when {
+        isSelected -> MaterialTheme.colorScheme.primaryContainer
+        isToday -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (inMonth) 0.22f else 0.10f)
+    }
+    Surface(
+        color = background,
+        shape = RoundedCornerShape(8.dp),
+        border = if (isSelected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = modifier
+            .padding(2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 3.dp, vertical = 3.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                day.dayOfMonth.toString(),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (isToday || isSelected) FontWeight.Bold else FontWeight.Normal,
+                color = when {
+                    isSelected -> MaterialTheme.colorScheme.onPrimaryContainer
+                    inMonth -> MaterialTheme.colorScheme.onSurface
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                },
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            appointments.take(3).forEach { appointment ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.78f)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(appointmentMonthAccentColor(appointment))
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentMonthSelectedDayHeader(
+    date: LocalDate,
+    appointmentCount: Int
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        Text(
+            date.dayOfMonth.toString(),
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            date.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, ruLocale),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            "Записей: $appointmentCount",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun AppointmentMonthAgendaRow(
+    appointment: AppointmentRow,
+    onClick: (AppointmentRow) -> Unit
+) {
+    val isCancelled = appointment.status == APPOINTMENT_STATUS_CANCELLED
+    val accentColor = appointmentMonthAccentColor(appointment)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { onClick(appointment) }
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                appointmentTimeOnly(appointment),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.width(58.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(accentColor)
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "${if (isCancelled) "Отменена: " else ""}${appointment.service.ifBlank { "Запись" }} - ${appointment.clientName.ifBlank { "Без клиента" }}",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    appointmentTimeRange(appointment),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 80.dp, end = 10.dp)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+        )
+    }
+}
+
+@Composable
+private fun appointmentMonthAccentColor(appointment: AppointmentRow): Color =
+    when {
+        appointment.status == APPOINTMENT_STATUS_CANCELLED -> MaterialTheme.colorScheme.error
+        appointment.calendarEventId > 0 -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+
+private fun lerpDp(start: Dp, stop: Dp, fraction: Float): Dp =
+    (start.value + (stop.value - start.value) * fraction.coerceIn(0f, 1f)).dp
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)

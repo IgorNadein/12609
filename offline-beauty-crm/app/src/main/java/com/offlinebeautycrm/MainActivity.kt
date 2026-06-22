@@ -9,6 +9,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.ContentProviderOperation
 import android.content.ContentUris
 import android.content.ContentValues
@@ -146,6 +147,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -234,6 +236,8 @@ private const val SYNC_MODE_LOCAL_TO_SYSTEM = "local_to_system"
 private const val SYNC_MODE_SYSTEM_TO_LOCAL = "system_to_local"
 private const val SYNC_MODE_TWO_WAY = "two_way"
 private const val APP_ICON_IMAGE_SIZE = 512
+private const val LAUNCHER_ICON_STANDARD = "standard"
+private const val LAUNCHER_ICON_IDEAL = "ideal"
 private const val PAYMENT_STATUS_UNPAID = "unpaid"
 private const val PAYMENT_STATUS_PARTIAL = "partial"
 private const val PAYMENT_STATUS_PAID = "paid"
@@ -537,7 +541,7 @@ data class AutoBackupState(
     val lastRunAt: String = ""
 )
 
-data class AppIconState(
+data class ShortcutIconState(
     val path: String = "",
     val updatedAt: Long = 0L
 ) {
@@ -2577,25 +2581,25 @@ private object AutoBackupStore {
     }
 }
 
-private object AppIconStore {
+private object ShortcutIconStore {
     private const val ICON_DIR = "branding"
     private const val ICON_FILE = "app_icon.png"
     private const val LEGACY_LOGO_FILE = "app_logo.png"
 
-    fun load(context: Context): AppIconState {
+    fun load(context: Context): ShortcutIconState {
         val file = iconFile(context)
         val legacyFile = legacyLogoFile(context)
         if (!file.exists() && legacyFile.exists()) {
             runCatching { legacyFile.renameTo(file) }
         }
         return if (file.exists() && file.length() > 0L) {
-            AppIconState(path = file.absolutePath, updatedAt = file.lastModified())
+            ShortcutIconState(path = file.absolutePath, updatedAt = file.lastModified())
         } else {
-            AppIconState()
+            ShortcutIconState()
         }
     }
 
-    fun save(context: Context, uri: Uri): AppIconState {
+    fun save(context: Context, uri: Uri): ShortcutIconState {
         val source = decodeIconBitmap(context, uri) ?: error("не удалось прочитать изображение")
         val icon = source.centerSquare(APP_ICON_IMAGE_SIZE)
         val file = iconFile(context)
@@ -2613,9 +2617,9 @@ private object AppIconStore {
         return load(context)
     }
 
-    fun reset(context: Context): AppIconState {
+    fun reset(context: Context): ShortcutIconState {
         iconFile(context).delete()
-        return AppIconState()
+        return ShortcutIconState()
     }
 
     fun bitmap(context: Context): Bitmap? =
@@ -2660,6 +2664,47 @@ private object AppIconStore {
             Bitmap.createScaledBitmap(square, targetSize, targetSize, true)
         }
     }
+}
+
+private object LauncherIconStore {
+    private const val DEFAULT_ALIAS = "com.offlinebeautycrm.MainActivityDefaultIcon"
+    private const val IDEAL_ALIAS = "com.offlinebeautycrm.MainActivityIdealIcon"
+
+    fun current(context: Context): String {
+        val pm = context.packageManager
+        return if (isEnabled(pm, ComponentName(context, IDEAL_ALIAS), defaultEnabled = false)) {
+            LAUNCHER_ICON_IDEAL
+        } else {
+            LAUNCHER_ICON_STANDARD
+        }
+    }
+
+    fun apply(context: Context, mode: String): String {
+        val appContext = context.applicationContext
+        val pm = appContext.packageManager
+        val standard = ComponentName(appContext, DEFAULT_ALIAS)
+        val ideal = ComponentName(appContext, IDEAL_ALIAS)
+        val selected = if (mode == LAUNCHER_ICON_IDEAL) ideal else standard
+        val unselected = if (mode == LAUNCHER_ICON_IDEAL) standard else ideal
+        pm.setComponentEnabledSetting(
+            selected,
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+            PackageManager.DONT_KILL_APP
+        )
+        pm.setComponentEnabledSetting(
+            unselected,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.DONT_KILL_APP
+        )
+        return current(appContext)
+    }
+
+    private fun isEnabled(pm: PackageManager, component: ComponentName, defaultEnabled: Boolean): Boolean =
+        when (pm.getComponentEnabledSetting(component)) {
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED -> false
+            else -> defaultEnabled
+        }
 }
 
 private object AutoBackupJson {
@@ -2974,7 +3019,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var autoBackupState by mutableStateOf(AutoBackupStore.load(application))
         private set
-    var appIconState by mutableStateOf(AppIconStore.load(application))
+    var launcherIconMode by mutableStateOf(LauncherIconStore.current(application))
+        private set
+    var shortcutIconState by mutableStateOf(ShortcutIconStore.load(application))
         private set
     var contacts by mutableStateOf<List<ContactCandidate>>(emptyList())
         private set
@@ -2999,29 +3046,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveAppIcon(context: Context, uri: Uri) {
+    fun setLauncherIcon(context: Context, mode: String) {
+        try {
+            launcherIconMode = LauncherIconStore.apply(context.applicationContext, mode)
+            message = when (launcherIconMode) {
+                LAUNCHER_ICON_IDEAL -> "Иконка приложения: IDEALprofi"
+                else -> "Иконка приложения: стандартная"
+            }
+        } catch (e: Exception) {
+            message = "Не удалось сменить иконку: ${e.message ?: "ошибка лаунчера"}"
+        }
+    }
+
+    fun saveShortcutIcon(context: Context, uri: Uri) {
         viewModelScope.launch {
             try {
-                appIconState = withContext(Dispatchers.IO) {
-                    AppIconStore.save(context.applicationContext, uri)
+                shortcutIconState = withContext(Dispatchers.IO) {
+                    ShortcutIconStore.save(context.applicationContext, uri)
                 }
-                message = "Изображение иконки сохранено"
+                message = "Изображение ярлыка сохранено"
             } catch (e: Exception) {
-                message = "Не удалось сохранить иконку: ${e.message ?: "ошибка изображения"}"
+                message = "Не удалось сохранить изображение ярлыка: ${e.message ?: "ошибка изображения"}"
             }
         }
     }
 
-    fun resetAppIcon() {
-        appIconState = AppIconStore.reset(getApplication())
-        message = "Изображение иконки сброшено"
+    fun resetShortcutIcon() {
+        shortcutIconState = ShortcutIconStore.reset(getApplication())
+        message = "Изображение ярлыка сброшено"
     }
 
-    fun createAppIconShortcut(context: Context) {
+    fun createCustomIconShortcut(context: Context) {
         val appContext = context.applicationContext
-        val bitmap = AppIconStore.bitmap(appContext)
-        if (bitmap == null || !appIconState.isSet) {
-            message = "Сначала выбери изображение иконки"
+        val bitmap = ShortcutIconStore.bitmap(appContext)
+        if (bitmap == null || !shortcutIconState.isSet) {
+            message = "Сначала выбери изображение ярлыка"
             return
         }
         val shortcutManager = appContext.getSystemService(android.content.pm.ShortcutManager::class.java)
@@ -3044,7 +3103,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val updated = shortcutManager.pinnedShortcuts.any { it.id == shortcut.id } &&
             shortcutManager.updateShortcuts(listOf(shortcut))
         if (updated) {
-            message = "Иконка ярлыка обновлена"
+            message = "Ярлык с иконкой обновлен"
             return
         }
         message = if (shortcutManager.requestPinShortcut(shortcut, null)) {
@@ -4623,8 +4682,8 @@ private fun BottomNavIcon(screen: Screen) {
 }
 
 @Composable
-private fun AppIconPreview(
-    state: AppIconState,
+private fun ShortcutIconPreview(
+    state: ShortcutIconState,
     modifier: Modifier = Modifier.size(48.dp),
     contentDescription: String? = null
 ) {
@@ -10099,7 +10158,8 @@ private fun SettingsScreen(
             rules = rules,
             outbox = outbox,
             syncSettings = syncSettings,
-            appIconState = viewModel.appIconState,
+            launcherIconMode = viewModel.launcherIconMode,
+            shortcutIconState = viewModel.shortcutIconState,
             onOpen = onSubScreenChange
         )
         SettingsSubScreen.Branding -> ScrollPage {
@@ -10139,7 +10199,8 @@ private fun SettingsMenuScreen(
     rules: List<AutomationRuleEntity>,
     outbox: List<OutboxRow>,
     syncSettings: List<SyncSettingsEntity>,
-    appIconState: AppIconState,
+    launcherIconMode: String,
+    shortcutIconState: ShortcutIconState,
     onOpen: (SettingsSubScreen) -> Unit
 ) {
     val contactsMode = syncModeLabel(SYNC_RESOURCE_CONTACTS, syncSettingFor(syncSettings, SYNC_RESOURCE_CONTACTS).mode)
@@ -10161,7 +10222,8 @@ private fun SettingsMenuScreen(
         item {
             SettingsMenuItem(
                 title = "Иконка приложения",
-                subtitle = if (appIconState.isSet) "Изображение выбрано, можно создать ярлык" else "Фото из галереи для ярлыка на главном экране",
+                subtitle = "Сейчас: ${launcherIconModeLabel(launcherIconMode)}" +
+                    if (shortcutIconState.isSet) " · ярлык готов" else " · доп. ярлык из галереи",
                 icon = Icons.Filled.AddAPhoto,
                 onClick = { onOpen(SettingsSubScreen.Branding) }
             )
@@ -10228,32 +10290,63 @@ private fun SettingsMenuScreen(
 @Composable
 private fun AppIconSettingsSection(viewModel: AppViewModel) {
     val context = LocalContext.current
-    val iconState = viewModel.appIconState
+    val iconState = viewModel.shortcutIconState
     val iconPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            viewModel.saveAppIcon(context, uri)
+            viewModel.saveShortcutIcon(context, uri)
         }
     }
 
     SectionTitle("Иконка приложения")
     InfoCard {
+        Text("Настоящая иконка", fontWeight = FontWeight.Bold)
+        Text(
+            "Эти варианты встроены в приложение и меняют иконку в лаунчере.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            LauncherIconOptionButton(
+                label = "Стандартная",
+                painterRes = R.drawable.ic_launcher_standard_preview,
+                selected = viewModel.launcherIconMode == LAUNCHER_ICON_STANDARD,
+                onClick = { viewModel.setLauncherIcon(context, LAUNCHER_ICON_STANDARD) },
+                modifier = Modifier.weight(1f)
+            )
+            LauncherIconOptionButton(
+                label = "IDEALprofi",
+                painterRes = R.drawable.ic_launcher_ideal_preview,
+                selected = viewModel.launcherIconMode == LAUNCHER_ICON_IDEAL,
+                onClick = { viewModel.setLauncherIcon(context, LAUNCHER_ICON_IDEAL) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+    InfoCard {
+        Text("Доп. ярлык из галереи", fontWeight = FontWeight.Bold)
+        Text(
+            "Оставляет системную иконку как есть, но создаёт ярлык на главном экране с любой выбранной картинкой.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            AppIconPreview(
+            ShortcutIconPreview(
                 state = iconState,
-                modifier = Modifier.size(96.dp),
-                contentDescription = "Выбранная иконка приложения"
+                modifier = Modifier.size(84.dp),
+                contentDescription = "Выбранная иконка ярлыка"
             )
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Выбранное изображение", fontWeight = FontWeight.Bold)
-                Text(
-                    text = if (iconState.isSet) "Готово для ярлыка на главном экране" else "Пока используется стандартная иконка",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = if (iconState.isSet) "Изображение ярлыка выбрано" else "Изображение ярлыка не выбрано",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
         }
         Spacer(Modifier.height(8.dp))
         Button(
@@ -10265,7 +10358,7 @@ private fun AppIconSettingsSection(viewModel: AppViewModel) {
             Text(if (iconState.isSet) "Сменить фото" else "Выбрать фото")
         }
         Button(
-            onClick = { viewModel.createAppIconShortcut(context) },
+            onClick = { viewModel.createCustomIconShortcut(context) },
             enabled = iconState.isSet,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -10274,13 +10367,57 @@ private fun AppIconSettingsSection(viewModel: AppViewModel) {
             Text("Создать ярлык с иконкой")
         }
         OutlinedButton(
-            onClick = { viewModel.resetAppIcon() },
+            onClick = { viewModel.resetShortcutIcon() },
             enabled = iconState.isSet,
             modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Filled.Close, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("Сбросить изображение")
+        }
+    }
+}
+
+@Composable
+private fun LauncherIconOptionButton(
+    label: String,
+    painterRes: Int,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .height(136.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+        ),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Image(
+                painter = painterResource(painterRes),
+                contentDescription = label,
+                modifier = Modifier.size(64.dp)
+            )
+            Text(
+                text = label,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = if (selected) "Выбрана" else "Выбрать",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
@@ -10964,6 +11101,11 @@ private fun autoBackupModeLabel(mode: String): String = when (mode) {
     AUTO_BACKUP_MODE_DAILY -> "Ежедневно"
     AUTO_BACKUP_MODE_WEEKLY -> "Еженедельно"
     else -> "Отключено"
+}
+
+private fun launcherIconModeLabel(mode: String): String = when (mode) {
+    LAUNCHER_ICON_IDEAL -> "IDEALprofi"
+    else -> "Стандартная"
 }
 
 private fun outboxDisplayStatus(row: OutboxRow): String {

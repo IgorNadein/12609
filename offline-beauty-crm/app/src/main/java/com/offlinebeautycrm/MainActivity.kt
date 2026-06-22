@@ -15,7 +15,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -231,6 +233,7 @@ private const val SYNC_MODE_MANUAL = "manual"
 private const val SYNC_MODE_LOCAL_TO_SYSTEM = "local_to_system"
 private const val SYNC_MODE_SYSTEM_TO_LOCAL = "system_to_local"
 private const val SYNC_MODE_TWO_WAY = "two_way"
+private const val APP_LOGO_IMAGE_SIZE = 512
 private const val PAYMENT_STATUS_UNPAID = "unpaid"
 private const val PAYMENT_STATUS_PARTIAL = "partial"
 private const val PAYMENT_STATUS_PAID = "paid"
@@ -533,6 +536,14 @@ data class AutoBackupState(
     val folderUri: String = "",
     val lastRunAt: String = ""
 )
+
+data class AppLogoState(
+    val path: String = "",
+    val updatedAt: Long = 0L
+) {
+    val isSet: Boolean
+        get() = path.isNotBlank()
+}
 
 data class ClientDraft(
     val name: String,
@@ -2566,6 +2577,80 @@ private object AutoBackupStore {
     }
 }
 
+private object AppLogoStore {
+    private const val LOGO_DIR = "branding"
+    private const val LOGO_FILE = "app_logo.png"
+
+    fun load(context: Context): AppLogoState {
+        val file = logoFile(context)
+        return if (file.exists() && file.length() > 0L) {
+            AppLogoState(path = file.absolutePath, updatedAt = file.lastModified())
+        } else {
+            AppLogoState()
+        }
+    }
+
+    fun save(context: Context, uri: Uri): AppLogoState {
+        val source = decodeLogoBitmap(context, uri) ?: error("не удалось прочитать изображение")
+        val logo = source.centerSquare(APP_LOGO_IMAGE_SIZE)
+        val file = logoFile(context)
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, "$LOGO_FILE.tmp")
+        FileOutputStream(tmp).use { stream ->
+            if (!logo.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                error("не удалось сохранить логотип")
+            }
+        }
+        if (file.exists()) file.delete()
+        if (!tmp.renameTo(file)) {
+            error("не удалось заменить логотип")
+        }
+        return load(context)
+    }
+
+    fun reset(context: Context): AppLogoState {
+        logoFile(context).delete()
+        return AppLogoState()
+    }
+
+    private fun logoFile(context: Context): File =
+        File(File(context.filesDir, LOGO_DIR), LOGO_FILE)
+
+    private fun decodeLogoBitmap(context: Context, uri: Uri): Bitmap? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+                val largestSide = maxOf(info.size.width, info.size.height)
+                if (largestSide > APP_LOGO_IMAGE_SIZE) {
+                    decoder.setTargetSampleSize((largestSide / APP_LOGO_IMAGE_SIZE).coerceAtLeast(1))
+                }
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } else {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, bounds)
+            }
+            val largestSide = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+            val sampleSize = (largestSide / APP_LOGO_IMAGE_SIZE).coerceAtLeast(1)
+            val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, options)
+            }
+        }
+
+    private fun Bitmap.centerSquare(targetSize: Int): Bitmap {
+        val side = minOf(width, height)
+        val left = (width - side) / 2
+        val top = (height - side) / 2
+        val square = Bitmap.createBitmap(this, left, top, side, side)
+        return if (side == targetSize) {
+            square
+        } else {
+            Bitmap.createScaledBitmap(square, targetSize, targetSize, true)
+        }
+    }
+}
+
 private object AutoBackupJson {
     suspend fun create(context: Context, db: AppDatabase, requireEnabled: Boolean = true): String? {
         val state = AutoBackupStore.load(context)
@@ -2878,6 +2963,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var autoBackupState by mutableStateOf(AutoBackupStore.load(application))
         private set
+    var appLogoState by mutableStateOf(AppLogoStore.load(application))
+        private set
     var contacts by mutableStateOf<List<ContactCandidate>>(emptyList())
         private set
     var counts by mutableStateOf(Counts(0, 0, 0, 0))
@@ -2899,6 +2986,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (message == expectedMessage) {
             message = ""
         }
+    }
+
+    fun saveAppLogo(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                appLogoState = withContext(Dispatchers.IO) {
+                    AppLogoStore.save(context.applicationContext, uri)
+                }
+                message = "Логотип приложения обновлен"
+            } catch (e: Exception) {
+                message = "Не удалось сохранить логотип: ${e.message ?: "ошибка изображения"}"
+            }
+        }
+    }
+
+    fun resetAppLogo() {
+        appLogoState = AppLogoStore.reset(getApplication())
+        message = "Логотип сброшен"
     }
 
     fun addClient(context: Context, draft: ClientDraft, syncContact: Boolean) {
@@ -4157,6 +4262,7 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     val outbox by viewModel.outbox.collectAsState(initial = emptyList())
     val syncSettings by viewModel.syncSettings.collectAsState(initial = emptyList())
     val financeTransactions by viewModel.financeTransactions.collectAsState(initial = emptyList())
+    val appLogoState = viewModel.appLogoState
     var screen by rememberSaveable { mutableStateOf(Screen.Clients) }
     var screenHistory by remember { mutableStateOf<List<Screen>>(emptyList()) }
     var clientSubScreen by rememberSaveable { mutableStateOf(ClientSubScreen.List) }
@@ -4286,7 +4392,13 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
             topBar = {
                 if (showTopChrome) {
                     TopAppBar(
-                        title = { Text(currentTopBarTitle, fontWeight = FontWeight.Bold) },
+                        title = {
+                            TopBarTitle(
+                                title = currentTopBarTitle,
+                                appLogoState = appLogoState,
+                                showLogo = !showTopBack
+                            )
+                        },
                         navigationIcon = {
                             if (showTopBack) {
                                 IconButton(onClick = { settingsSubScreen = SettingsSubScreen.Menu }) {
@@ -4416,6 +4528,7 @@ private enum class ClientSubScreen {
 
 private enum class SettingsSubScreen(val label: String) {
     Menu("Настройки"),
+    Branding("Логотип"),
     Integrations("Интеграции"),
     Sync("Синхронизация"),
     Services("Услуги"),
@@ -4465,6 +4578,66 @@ private fun BottomNavIcon(screen: Screen) {
         Screen.Appointments -> Icon(Icons.Filled.DateRange, contentDescription = screen.label)
         Screen.Finance -> Icon(Icons.Filled.Payments, contentDescription = screen.label)
         Screen.Settings -> Icon(Icons.Filled.Settings, contentDescription = screen.label)
+    }
+}
+
+@Composable
+private fun TopBarTitle(title: String, appLogoState: AppLogoState, showLogo: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (showLogo && appLogoState.isSet) {
+            AppLogoImage(
+                state = appLogoState,
+                modifier = Modifier.size(32.dp),
+                contentDescription = "Логотип приложения"
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun AppLogoImage(
+    state: AppLogoState,
+    modifier: Modifier = Modifier.size(48.dp),
+    contentDescription: String? = null
+) {
+    var image by remember(state.path, state.updatedAt) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(state.path, state.updatedAt) {
+        image = if (state.path.isBlank()) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    BitmapFactory.decodeFile(state.path)?.asImageBitmap()
+                }.getOrNull()
+            }
+        }
+    }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        val loadedImage = image
+        if (loadedImage != null) {
+            Image(
+                bitmap = loadedImage,
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(
+                Icons.Filled.Business,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(8.dp)
+            )
+        }
     }
 }
 
@@ -9900,8 +10073,12 @@ private fun SettingsScreen(
             rules = rules,
             outbox = outbox,
             syncSettings = syncSettings,
+            appLogoState = viewModel.appLogoState,
             onOpen = onSubScreenChange
         )
+        SettingsSubScreen.Branding -> ScrollPage {
+            BrandingSettingsSection(viewModel)
+        }
         SettingsSubScreen.Integrations -> ScrollPage {
             BookingBotsSettingsSection()
         }
@@ -9936,6 +10113,7 @@ private fun SettingsMenuScreen(
     rules: List<AutomationRuleEntity>,
     outbox: List<OutboxRow>,
     syncSettings: List<SyncSettingsEntity>,
+    appLogoState: AppLogoState,
     onOpen: (SettingsSubScreen) -> Unit
 ) {
     val contactsMode = syncModeLabel(SYNC_RESOURCE_CONTACTS, syncSettingFor(syncSettings, SYNC_RESOURCE_CONTACTS).mode)
@@ -9952,6 +10130,14 @@ private fun SettingsMenuScreen(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)
+            )
+        }
+        item {
+            SettingsMenuItem(
+                title = "Логотип приложения",
+                subtitle = if (appLogoState.isSet) "Выбран из галереи" else "Фото из галереи для шапки приложения",
+                icon = Icons.Filled.AddAPhoto,
+                onClick = { onOpen(SettingsSubScreen.Branding) }
             )
         }
         item {
@@ -10009,6 +10195,57 @@ private fun SettingsMenuScreen(
                 icon = Icons.Filled.Sync,
                 onClick = { onOpen(SettingsSubScreen.Updates) }
             )
+        }
+    }
+}
+
+@Composable
+private fun BrandingSettingsSection(viewModel: AppViewModel) {
+    val context = LocalContext.current
+    val logoState = viewModel.appLogoState
+    val logoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            viewModel.saveAppLogo(context, uri)
+        }
+    }
+
+    SectionTitle("Логотип приложения")
+    InfoCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            AppLogoImage(
+                state = logoState,
+                modifier = Modifier.size(96.dp),
+                contentDescription = "Текущий логотип приложения"
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Текущий логотип", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (logoState.isSet) "Фото сохранено и показывается в шапке" else "Пока используется стандартная иконка",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = { logoPicker.launch(arrayOf("image/*")) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Filled.AddAPhoto, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (logoState.isSet) "Сменить фото" else "Выбрать фото")
+        }
+        OutlinedButton(
+            onClick = { viewModel.resetAppLogo() },
+            enabled = logoState.isSet,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Filled.Close, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Сбросить логотип")
         }
     }
 }

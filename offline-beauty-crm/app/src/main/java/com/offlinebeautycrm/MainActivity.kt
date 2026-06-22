@@ -146,6 +146,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -155,6 +156,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -6223,6 +6225,8 @@ private fun AppointmentsScreen(
     var serviceCreatorTargetId by remember { mutableStateOf<Int?>(null) }
     var selectedAppointmentId by remember { mutableStateOf<Long?>(null) }
     var selectedClientProfileId by remember { mutableStateOf<Long?>(null) }
+    var monthPreviewDate by remember { mutableStateOf<LocalDate?>(null) }
+    var monthPreviewAppointmentId by remember { mutableStateOf<Long?>(null) }
     var editingAppointmentId by remember { mutableStateOf<Long?>(null) }
     var movingAppointmentId by remember { mutableStateOf<Long?>(null) }
     var appointmentConflict by remember { mutableStateOf<AppointmentConflictAction?>(null) }
@@ -6327,6 +6331,18 @@ private fun AppointmentsScreen(
         onEditorOpenChange(false)
     }
 
+    fun openMonthDayPreview(appointment: AppointmentRow) {
+        val date = parseAppointmentDateTime(appointment.startAt)?.toLocalDate() ?: selectedDate
+        monthPreviewDate = date
+        monthPreviewAppointmentId = appointment.id
+        selectedDate = date
+    }
+
+    fun closeMonthDayPreview() {
+        monthPreviewDate = null
+        monthPreviewAppointmentId = null
+    }
+
     fun openAppointmentEditor(appointment: AppointmentRow) {
         val parsedDateTime = parseAppointmentDateTime(appointment.startAt)
         editingAppointmentId = appointment.id
@@ -6429,8 +6445,10 @@ private fun AppointmentsScreen(
         }
     }
 
-    BackHandler(enabled = showCreateSheet || selectedClientProfileId != null || selectedAppointmentId != null) {
-        if (selectedClientProfileId != null) {
+    BackHandler(enabled = showCreateSheet || selectedClientProfileId != null || selectedAppointmentId != null || monthPreviewDate != null) {
+        if (monthPreviewDate != null) {
+            closeMonthDayPreview()
+        } else if (selectedClientProfileId != null) {
             selectedClientProfileId = null
         } else if (showCreateSheet) {
             requestCloseEditor()
@@ -6486,7 +6504,7 @@ private fun AppointmentsScreen(
                         selectedDate = selectedDate,
                         appointments = visibleAppointments,
                         hasCalendarPermissions = hasCalendarPermissions,
-                        onAppointmentClick = { openAppointmentDetails(it) },
+                        onAppointmentClick = { openMonthDayPreview(it) },
                         onDayClick = {
                             selectedDate = it
                             calendarView = AppointmentCalendarView.Day
@@ -6494,6 +6512,24 @@ private fun AppointmentsScreen(
                     )
                 }
             }
+        }
+
+        monthPreviewDate?.let { previewDate ->
+            AppointmentMonthDaySheet(
+                date = previewDate,
+                appointments = visibleAppointments,
+                selectedAppointmentId = monthPreviewAppointmentId,
+                hasCalendarPermissions = hasCalendarPermissions,
+                onDismiss = { closeMonthDayPreview() },
+                onAppointmentClick = { appointment ->
+                    closeMonthDayPreview()
+                    openAppointmentDetails(appointment)
+                },
+                onCreateAppointment = { date ->
+                    closeMonthDayPreview()
+                    openNewAppointmentAt(date)
+                }
+            )
         }
 
         selectedAppointment?.let { appointment ->
@@ -7056,6 +7092,160 @@ private fun AppointmentTimelineCard(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun AppointmentMonthDaySheet(
+    date: LocalDate,
+    appointments: List<AppointmentRow>,
+    selectedAppointmentId: Long?,
+    hasCalendarPermissions: Boolean,
+    onDismiss: () -> Unit,
+    onAppointmentClick: (AppointmentRow) -> Unit,
+    onCreateAppointment: (LocalDate) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+    val hourHeight = 72.dp
+    val dayAppointments = remember(date, appointments) {
+        appointments
+            .mapNotNull { appointment ->
+                parseAppointmentDateTime(appointment.startAt)
+                    ?.takeIf { it.toLocalDate() == date }
+                    ?.let { start -> appointment to start }
+            }
+            .sortedBy { it.second.toLocalTime() }
+    }
+    LaunchedEffect(date, selectedAppointmentId, dayAppointments) {
+        val selectedStart = dayAppointments
+            .firstOrNull { it.first.id == selectedAppointmentId }
+            ?.second
+            ?: dayAppointments.firstOrNull()?.second
+        val startMinute = selectedStart?.let { it.hour * 60 + it.minute } ?: 9 * 60
+        val targetPx = with(density) {
+            (hourHeight.toPx() * (startMinute / 60f) - 72.dp.toPx()).toInt()
+        }.coerceAtLeast(0)
+        delay(80)
+        scrollState.scrollTo(targetPx)
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.86f)
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "${date.dayOfMonth} ${date.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, ruLocale)}",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        date.format(dayMonthFormatter),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .verticalScroll(scrollState)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(hourHeight * 24)
+                        .padding(vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        (0..23).forEach { hour ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(hourHeight)
+                                    .padding(horizontal = 8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    hour.toString(),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .width(34.dp)
+                                        .padding(top = 2.dp)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(top = 8.dp)
+                                        .height(1.dp)
+                                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                                )
+                            }
+                        }
+                    }
+                    dayAppointments.forEach { (appointment, start) ->
+                        val startMinute = start.hour * 60 + start.minute
+                        val visibleDuration = appointment.durationMinutes
+                            .coerceAtLeast(15)
+                            .coerceAtMost((24 * 60 - startMinute).coerceAtLeast(15))
+                        val topOffset = hourHeight * (startMinute / 60f)
+                        val cardHeight = (hourHeight * (visibleDuration / 60f)).coerceAtLeast(44.dp)
+                        AppointmentTimelineCard(
+                            appointment = appointment,
+                            hasCalendarPermissions = hasCalendarPermissions,
+                            onClick = onAppointmentClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .offset(y = topOffset)
+                                .height(cardHeight)
+                                .padding(start = 48.dp, end = 8.dp, top = 2.dp, bottom = 2.dp)
+                        )
+                    }
+                    if (dayAppointments.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = hourHeight * 9),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "На этот день записей нет",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+            Button(
+                onClick = { onCreateAppointment(date) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) {
+                Text("Добавить на ${date.format(dayMonthFormatter)}")
+                Spacer(Modifier.width(8.dp))
+                Icon(Icons.Filled.Add, contentDescription = null)
+            }
+        }
+    }
+}
+
+@Composable
 private fun AppointmentMonthView(
     selectedDate: LocalDate,
     appointments: List<AppointmentRow>,
@@ -7130,8 +7320,8 @@ private fun AppointmentMonthDayCell(
             .clip(RoundedCornerShape(8.dp))
             .background(background)
             .clickable(onClick = onClick)
-            .padding(5.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Text(
             day.dayOfMonth.toString(),
@@ -7139,7 +7329,7 @@ private fun AppointmentMonthDayCell(
             fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
             color = if (inMonth) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
         )
-        appointments.take(2).forEach { appointment ->
+        appointments.take(3).forEach { appointment ->
             val isCancelled = appointment.status == APPOINTMENT_STATUS_CANCELLED
             Surface(
                 color = when {
@@ -7155,22 +7345,32 @@ private fun AppointmentMonthDayCell(
                 shape = RoundedCornerShape(50),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .height(16.dp)
                     .clip(RoundedCornerShape(50))
                     .clickable { onAppointmentClick(appointment) }
             ) {
-                Text(
-                    "${appointmentTimeOnly(appointment)} ${if (isCancelled) "Отменена: " else ""}${appointment.service}",
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 4.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text(
+                        "${appointmentTimeOnly(appointment)} ${if (isCancelled) "Отменена: " else ""}${appointment.service}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 11.sp,
+                            lineHeight = 11.sp
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
-        if (appointments.size > 2) {
+        if (appointments.size > 3) {
             Text(
-                "+${appointments.size - 2}",
-                style = MaterialTheme.typography.labelSmall,
+                "+${appointments.size - 3}",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 11.sp),
                 color = MaterialTheme.colorScheme.primary
             )
         }

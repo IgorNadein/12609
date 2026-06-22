@@ -30,11 +30,13 @@ import android.provider.Settings
 import android.telephony.SmsManager
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
+import android.util.LruCache
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -42,6 +44,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -63,7 +66,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -135,17 +137,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -169,6 +174,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
@@ -178,6 +184,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.FileProvider
@@ -207,7 +214,13 @@ import androidx.work.workDataOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -217,7 +230,6 @@ import java.io.FileOutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -225,8 +237,8 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
-import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
@@ -244,6 +256,11 @@ private const val ACTION_AUTOMATION_SKIP = "com.offlinebeautycrm.action.AUTOMATI
 private const val EXTRA_OUTBOX_ID = "outboxId"
 private const val AUTO_BACKUP_WORK = "auto_backup_json"
 private const val AUTO_BACKUP_PREFS = "auto_backup"
+private const val STARTUP_MAINTENANCE_PREFS = "startup_maintenance"
+private const val MAINTENANCE_NORMALIZE_SMS_ONLY = "normalize_sms_only_v1"
+private const val MAINTENANCE_BACKFILL_PRICE_CENTS = "backfill_price_cents_v1"
+private const val STARTUP_WARMUP_MS = 1_500L
+private const val STARTUP_MAINTENANCE_DELAY_MS = 15_000L
 private const val AUTO_BACKUP_MODE_OFF = "off"
 private const val AUTO_BACKUP_MODE_DAILY = "daily"
 private const val AUTO_BACKUP_MODE_WEEKLY = "weekly"
@@ -317,6 +334,9 @@ private val channelOptions = listOf(CHANNEL_SMS)
 private val autoBackupModeOptions = listOf(AUTO_BACKUP_MODE_OFF, AUTO_BACKUP_MODE_DAILY, AUTO_BACKUP_MODE_WEEKLY)
 private val ruLocale = Locale("ru")
 private val appointmentStorageFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
+private val appointmentStorageSecondsFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US)
+private val appointmentStorageInputFormatters = listOf(appointmentStorageFormatter, appointmentStorageSecondsFormatter)
+private val fileStampFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.US)
 private val dayOfWeekFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", ruLocale)
 private val monthTitleFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("LLLL yyyy", ruLocale)
 private val dayMonthFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMMM", ruLocale)
@@ -553,6 +573,41 @@ data class Counts(
     val rules: Int,
     val outbox: Int
 )
+
+private data class StartupWarmupBase(
+    val clients: Int,
+    val counts: Counts
+)
+
+data class StartupWarmupState(
+    val clients: Int = 0,
+    val appointments: Int = 0,
+    val parsedAppointments: Int = 0,
+    val appointmentDates: Int = 0,
+    val appointmentClients: Int = 0,
+    val services: Int = 0,
+    val rules: Int = 0,
+    val outbox: Int = 0,
+    val settings: Int = 0,
+    val financeTransactions: Int = 0,
+    val counts: Counts = Counts(0, 0, 0, 0)
+) {
+    val totalPreparedItems: Int
+        get() = clients +
+            appointments +
+            parsedAppointments +
+            appointmentDates +
+            appointmentClients +
+            services +
+            rules +
+            outbox +
+            settings +
+            financeTransactions +
+            counts.clients +
+            counts.appointments +
+            counts.rules +
+            counts.outbox
+}
 
 data class AutoBackupState(
     val mode: String = AUTO_BACKUP_MODE_OFF,
@@ -1858,6 +1913,31 @@ interface AppDao {
     @Query("SELECT * FROM services WHERE isActive = 1 ORDER BY name COLLATE NOCASE")
     fun observeServices(): Flow<List<ServiceEntity>>
 
+    @Query(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM clients) AS clients,
+            (SELECT COUNT(*) FROM appointments) AS appointments,
+            (SELECT COUNT(*) FROM automation_rules) AS rules,
+            (SELECT COUNT(*) FROM outbox) AS outbox
+        """
+    )
+    fun observeCounts(): Flow<Counts>
+
+    @Query(
+        """
+        SELECT o.id, COALESCE(r.name, 'Ручная задача') AS ruleName, COALESCE(c.name, '-') AS clientName,
+               COALESCE(c.phone, '') AS clientPhone, o.channel, o.scheduledAt, o.status, o.payload,
+               o.error, o.createdAt, o.sentAt
+        FROM outbox o
+        LEFT JOIN automation_rules r ON r.id = o.ruleId
+        LEFT JOIN clients c ON c.id = o.clientId
+        WHERE o.status = :status AND o.error = :error
+        ORDER BY o.scheduledAt, o.id
+        """
+    )
+    fun observeOutboxByStatusAndError(status: String, error: String): Flow<List<OutboxRow>>
+
     @Query("SELECT COUNT(*) FROM clients")
     suspend fun countClients(): Int
 
@@ -3024,15 +3104,59 @@ private fun hasAutomationNotificationPermission(context: Context): Boolean =
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.get(application)
     private val dao = db.dao()
+    private val maintenancePrefs = application.getSharedPreferences(STARTUP_MAINTENANCE_PREFS, Context.MODE_PRIVATE)
+    private var deferredMaintenanceStarted = false
+    private val eagerDataSharing = SharingStarted.Eagerly
+    private val activeDataSharing = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000)
 
-    val clients: Flow<List<ClientEntity>> = dao.observeClients()
-    val appointments: Flow<List<AppointmentRow>> = dao.observeAppointments()
-    val services: Flow<List<ServiceEntity>> = dao.observeServices()
-    val rules: Flow<List<AutomationRuleEntity>> = dao.observeRules()
-    val outbox: Flow<List<OutboxRow>> = dao.observeOutbox()
-    val settings: Flow<List<ConnectorSettingsEntity>> = dao.observeSettings()
-    val syncSettings: Flow<List<SyncSettingsEntity>> = dao.observeSyncSettings()
-    val financeTransactions: Flow<List<FinanceTransactionEntity>> = dao.observeFinanceTransactions()
+    val clients: StateFlow<List<ClientEntity>> = dao.observeClients()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, eagerDataSharing, emptyList())
+    private val appointmentRows: StateFlow<List<AppointmentRow>> = dao.observeAppointments()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val appointments: StateFlow<List<AppointmentRow>> = appointmentRows
+    val appointmentIndex: StateFlow<AppointmentIndex> = appointmentRows
+        .map { buildAppointmentIndex(it) }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, activeDataSharing, AppointmentIndex.Empty)
+    val services: StateFlow<List<ServiceEntity>> = dao.observeServices()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val rules: StateFlow<List<AutomationRuleEntity>> = dao.observeRules()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val outbox: StateFlow<List<OutboxRow>> = dao.observeOutbox()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val pendingConfirmations: StateFlow<List<OutboxRow>> =
+        dao.observeOutboxByStatusAndError(STATUS_NEEDS_CONFIG, OUTBOX_CONFIRMATION_REQUIRED)
+            .flowOn(Dispatchers.IO)
+            .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val settings: StateFlow<List<ConnectorSettingsEntity>> = dao.observeSettings()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val syncSettings: StateFlow<List<SyncSettingsEntity>> = dao.observeSyncSettings()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val financeTransactions: StateFlow<List<FinanceTransactionEntity>> = dao.observeFinanceTransactions()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, emptyList())
+    val counts: StateFlow<Counts> = dao.observeCounts()
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, activeDataSharing, Counts(0, 0, 0, 0))
+    val startupWarmup: StateFlow<StartupWarmupState> = combine(clients, counts) { clients, counts ->
+        val base = StartupWarmupBase(
+            clients = clients.size,
+            counts = counts
+        )
+        StartupWarmupState(
+            clients = base.clients,
+            counts = base.counts
+        )
+    }
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, eagerDataSharing, StartupWarmupState())
 
     var message by mutableStateOf("")
         private set
@@ -3044,18 +3168,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var contacts by mutableStateOf<List<ContactCandidate>>(emptyList())
         private set
-    var counts by mutableStateOf(Counts(0, 0, 0, 0))
-        private set
 
     init {
         scheduleRetentionWorker(application)
         scheduleAutoBackupWorker(application)
-        viewModelScope.launch {
+    }
+
+    fun startDeferredMaintenance() {
+        if (deferredMaintenanceStarted) return
+        deferredMaintenanceStarted = true
+        viewModelScope.launch(Dispatchers.IO) {
             seedDefaults()
-            normalizeSmsOnlyAutomation()
-            backfillAppointmentPriceCents()
-            refreshContactLinksFromPhonebook()
-            refreshCounts()
+            runMaintenanceOnce(MAINTENANCE_NORMALIZE_SMS_ONLY) {
+                normalizeSmsOnlyAutomation()
+            }
+            runMaintenanceOnce(MAINTENANCE_BACKFILL_PRICE_CENTS) {
+                backfillAppointmentPriceCents()
+            }
         }
     }
 
@@ -4116,15 +4245,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshCounts() {
-        viewModelScope.launch {
-            counts = Counts(
-                clients = dao.countClients(),
-                appointments = dao.countAppointments(),
-                rules = dao.countRules(),
-                outbox = dao.countOutbox()
-            )
-        }
+    fun refreshCounts() = Unit
+
+    private suspend fun runMaintenanceOnce(key: String, block: suspend () -> Unit) {
+        if (maintenancePrefs.getBoolean(key, false)) return
+        block()
+        maintenancePrefs.edit().putBoolean(key, true).apply()
     }
 
     private suspend fun seedDefaults() {
@@ -4381,13 +4507,7 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     val colorScheme = remember(context, darkTheme, dynamicColorRefreshKey) {
         appColorScheme(context = context, darkTheme = darkTheme)
     }
-    val clients by viewModel.clients.collectAsState(initial = emptyList())
-    val appointments by viewModel.appointments.collectAsState(initial = emptyList())
-    val services by viewModel.services.collectAsState(initial = emptyList())
-    val rules by viewModel.rules.collectAsState(initial = emptyList())
-    val outbox by viewModel.outbox.collectAsState(initial = emptyList())
-    val syncSettings by viewModel.syncSettings.collectAsState(initial = emptyList())
-    val financeTransactions by viewModel.financeTransactions.collectAsState(initial = emptyList())
+    val pendingConfirmationRows by viewModel.pendingConfirmations.collectAsStateWithLifecycle(initialValue = emptyList())
     var screen by rememberSaveable { mutableStateOf(Screen.Clients) }
     var screenHistory by remember { mutableStateOf<List<Screen>>(emptyList()) }
     var clientSubScreen by rememberSaveable { mutableStateOf(ClientSubScreen.List) }
@@ -4395,6 +4515,7 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     var appointmentEditorOpen by remember { mutableStateOf(false) }
     var financeEditorOpen by remember { mutableStateOf(false) }
     var settingsEditorOpen by remember { mutableStateOf(false) }
+    var startupWarmupDone by rememberSaveable { mutableStateOf(false) }
     var requestedAppointmentId by rememberSaveable { mutableStateOf<Long?>(null) }
     var requestedAppointmentEditId by rememberSaveable { mutableStateOf<Long?>(null) }
     var requestedAppointmentClientId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -4416,8 +4537,8 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
         settingsSubScreen != SettingsSubScreen.Menu ||
         screenHistory.isNotEmpty()
     var confirmationClock by remember { mutableStateOf(System.currentTimeMillis()) }
-    val pendingConfirmation = remember(outbox, confirmationClock) {
-        outbox.firstOrNull { outboxNeedsConfirmation(it, confirmationClock) }
+    val pendingConfirmation = remember(pendingConfirmationRows, confirmationClock) {
+        pendingConfirmationRows.firstOrNull { outboxNeedsConfirmation(it, confirmationClock) }
     }
 
     DisposableEffect(context) {
@@ -4432,6 +4553,16 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
         onDispose {
             lifecycleOwner?.lifecycle?.removeObserver(observer)
         }
+    }
+
+    LaunchedEffect(Unit) {
+        delay(STARTUP_WARMUP_MS)
+        startupWarmupDone = true
+    }
+
+    LaunchedEffect(Unit) {
+        delay(STARTUP_MAINTENANCE_DELAY_MS)
+        viewModel.startDeferredMaintenance()
     }
 
     LaunchedEffect(Unit) {
@@ -4513,7 +4644,13 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
     }
 
     MaterialTheme(colorScheme = colorScheme) {
-        Scaffold(
+        if (!startupWarmupDone) {
+            StartupWarmupScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Scaffold(
             topBar = {
                 if (showTopChrome) {
                     TopAppBar(
@@ -4555,78 +4692,144 @@ fun OfflineBeautyApp(viewModel: AppViewModel = viewModel()) {
                 MessageBar(message = viewModel.message)
                 Box(modifier = Modifier.fillMaxSize()) {
                     when (screen) {
-                        Screen.Clients -> ClientsScreen(
-                            viewModel = viewModel,
-                            clients = clients,
-                            appointments = appointments,
-                            financeTransactions = financeTransactions,
-                            subScreen = clientSubScreen,
-                            selectedClientId = selectedClientId,
-                            onOpenClient = {
-                                selectedClientId = it
-                                clientSubScreen = ClientSubScreen.Detail
-                            },
-                            onSubScreenChange = { clientSubScreen = it },
-                            onOpenAppointment = { appointmentId ->
-                                screenHistory = screenHistory + screen
-                                screen = Screen.Appointments
-                                clientSubScreen = ClientSubScreen.List
-                                settingsSubScreen = SettingsSubScreen.Menu
-                                selectedClientId = null
-                                appointmentEditorOpen = true
-                                requestedAppointmentEditId = appointmentId
-                            },
-                            onCreateAppointment = { clientId ->
-                                screenHistory = screenHistory + screen
-                                screen = Screen.Appointments
-                                clientSubScreen = ClientSubScreen.List
-                                settingsSubScreen = SettingsSubScreen.Menu
-                                selectedClientId = null
-                                appointmentEditorOpen = true
-                                requestedAppointmentClientId = clientId
+                        Screen.Clients -> {
+                            val clients by viewModel.clients.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val appointmentIndex = if (clientSubScreen == ClientSubScreen.Detail) {
+                                viewModel.appointmentIndex.collectAsStateWithLifecycle().value
+                            } else {
+                                AppointmentIndex.Empty
                             }
-                        )
-                        Screen.Appointments -> AppointmentsScreen(
-                            viewModel = viewModel,
-                            clients = clients,
-                            appointments = appointments,
-                            services = services,
-                            financeTransactions = financeTransactions,
-                            requestedAppointmentId = requestedAppointmentId,
-                            onRequestedAppointmentConsumed = { requestedAppointmentId = null },
-                            requestedAppointmentEditId = requestedAppointmentEditId,
-                            onRequestedAppointmentEditConsumed = { requestedAppointmentEditId = null },
-                            requestedAppointmentClientId = requestedAppointmentClientId,
-                            onRequestedAppointmentClientConsumed = { requestedAppointmentClientId = null },
-                            onEditorOpenChange = { appointmentEditorOpen = it }
-                        )
-                        Screen.Finance -> FinanceScreen(
-                            viewModel = viewModel,
-                            appointments = appointments,
-                            transactions = financeTransactions,
-                            onEditorOpenChange = { financeEditorOpen = it }
-                        )
-                        Screen.Settings -> SettingsScreen(
-                            viewModel = viewModel,
-                            services = services,
-                            syncSettings = syncSettings,
-                            rules = rules,
-                            outbox = outbox,
-                            subScreen = settingsSubScreen,
-                            onEditorOpenChange = { settingsEditorOpen = it },
-                            onSubScreenChange = { settingsSubScreen = it }
-                        )
+                            val financeTransactions = if (clientSubScreen == ClientSubScreen.Detail) {
+                                viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList()).value
+                            } else {
+                                emptyList()
+                            }
+                            ClientsScreen(
+                                viewModel = viewModel,
+                                clients = clients,
+                                appointments = appointmentIndex.appointments,
+                                appointmentIndex = appointmentIndex,
+                                financeTransactions = financeTransactions,
+                                subScreen = clientSubScreen,
+                                selectedClientId = selectedClientId,
+                                onOpenClient = {
+                                    selectedClientId = it
+                                    clientSubScreen = ClientSubScreen.Detail
+                                },
+                                onSubScreenChange = { clientSubScreen = it },
+                                onOpenAppointment = { appointmentId ->
+                                    screenHistory = screenHistory + screen
+                                    screen = Screen.Appointments
+                                    clientSubScreen = ClientSubScreen.List
+                                    settingsSubScreen = SettingsSubScreen.Menu
+                                    selectedClientId = null
+                                    appointmentEditorOpen = true
+                                    requestedAppointmentEditId = appointmentId
+                                },
+                                onCreateAppointment = { clientId ->
+                                    screenHistory = screenHistory + screen
+                                    screen = Screen.Appointments
+                                    clientSubScreen = ClientSubScreen.List
+                                    settingsSubScreen = SettingsSubScreen.Menu
+                                    selectedClientId = null
+                                    appointmentEditorOpen = true
+                                    requestedAppointmentClientId = clientId
+                                }
+                            )
+                        }
+                        Screen.Appointments -> {
+                            val clients by viewModel.clients.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val appointmentIndex by viewModel.appointmentIndex.collectAsStateWithLifecycle()
+                            val services by viewModel.services.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList())
+                            AppointmentsScreen(
+                                viewModel = viewModel,
+                                clients = clients,
+                                appointments = appointmentIndex.appointments,
+                                appointmentIndex = appointmentIndex,
+                                services = services,
+                                financeTransactions = financeTransactions,
+                                requestedAppointmentId = requestedAppointmentId,
+                                onRequestedAppointmentConsumed = { requestedAppointmentId = null },
+                                requestedAppointmentEditId = requestedAppointmentEditId,
+                                onRequestedAppointmentEditConsumed = { requestedAppointmentEditId = null },
+                                requestedAppointmentClientId = requestedAppointmentClientId,
+                                onRequestedAppointmentClientConsumed = { requestedAppointmentClientId = null },
+                                onEditorOpenChange = { appointmentEditorOpen = it }
+                            )
+                        }
+                        Screen.Finance -> {
+                            val appointmentIndex by viewModel.appointmentIndex.collectAsStateWithLifecycle()
+                            val financeTransactions by viewModel.financeTransactions.collectAsStateWithLifecycle(initialValue = emptyList())
+                            FinanceScreen(
+                                viewModel = viewModel,
+                                appointmentIndex = appointmentIndex,
+                                transactions = financeTransactions,
+                                onEditorOpenChange = { financeEditorOpen = it }
+                            )
+                        }
+                        Screen.Settings -> {
+                            val services by viewModel.services.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val syncSettings by viewModel.syncSettings.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val rules by viewModel.rules.collectAsStateWithLifecycle(initialValue = emptyList())
+                            val outbox by viewModel.outbox.collectAsStateWithLifecycle(initialValue = emptyList())
+                            SettingsScreen(
+                                viewModel = viewModel,
+                                services = services,
+                                syncSettings = syncSettings,
+                                rules = rules,
+                                outbox = outbox,
+                                subScreen = settingsSubScreen,
+                                onEditorOpenChange = { settingsEditorOpen = it },
+                                onSubScreenChange = { settingsSubScreen = it }
+                            )
+                        }
                     }
                 }
             }
         }
 
-        pendingConfirmation?.let { confirmation ->
-            AutomationConfirmationDialog(
-                outbox = confirmation,
-                onSend = { viewModel.sendNow(confirmation.id) },
-                onSkip = { viewModel.skipOutbox(confirmation.id) }
-            )
+            pendingConfirmation?.let { confirmation ->
+                AutomationConfirmationDialog(
+                    outbox = confirmation,
+                    onSend = { viewModel.sendNow(confirmation.id) },
+                    onSkip = { viewModel.skipOutbox(confirmation.id) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartupWarmupScreen(
+    viewModel: AppViewModel,
+    modifier: Modifier = Modifier
+) {
+    val warmup by viewModel.startupWarmup.collectAsStateWithLifecycle()
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = modifier
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Загрузка",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Подготовка данных: ${warmup.totalPreparedItems}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
@@ -4662,6 +4865,17 @@ private enum class AppointmentCalendarView(val label: String) {
     ThreeDays("3 дня"),
     Week("Неделя"),
     Month("Месяц")
+}
+
+private enum class AppointmentMonthMode {
+    Expanded,
+    Collapsed,
+    SuperCollapsed
+}
+
+private enum class SwipeAnimationTarget {
+    Full,
+    Agenda
 }
 
 private sealed class AppointmentConflictAction {
@@ -4700,6 +4914,59 @@ private fun BottomNavIcon(screen: Screen) {
     }
 }
 
+private object ThumbnailImageCache {
+    private val cache = LruCache<String, ImageBitmap>(96)
+
+    fun loadFile(path: String, maxSizePx: Int): ImageBitmap? {
+        if (path.isBlank()) return null
+        val key = "file:$maxSizePx:$path"
+        cache.get(key)?.let { return it }
+        val bitmap = runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSizePx)
+            }
+            BitmapFactory.decodeFile(path, options)?.asImageBitmap()
+        }.getOrNull() ?: return null
+        cache.put(key, bitmap)
+        return bitmap
+    }
+
+    fun loadUri(context: Context, uriString: String, maxSizePx: Int): ImageBitmap? {
+        if (uriString.isBlank()) return null
+        val key = "uri:$maxSizePx:$uriString"
+        cache.get(key)?.let { return it }
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return null
+        val bitmap = runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, bounds)
+            }
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSizePx)
+            }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, options)?.asImageBitmap()
+            }
+        }.getOrNull() ?: return null
+        cache.put(key, bitmap)
+        return bitmap
+    }
+
+    private fun sampleSize(width: Int, height: Int, maxSizePx: Int): Int {
+        var sampleSize = 1
+        var scaledWidth = width
+        var scaledHeight = height
+        while (scaledWidth / 2 >= maxSizePx && scaledHeight / 2 >= maxSizePx) {
+            sampleSize *= 2
+            scaledWidth /= 2
+            scaledHeight /= 2
+        }
+        return sampleSize.coerceAtLeast(1)
+    }
+}
+
 @Composable
 private fun ShortcutIconPreview(
     state: ShortcutIconState,
@@ -4712,9 +4979,7 @@ private fun ShortcutIconPreview(
             null
         } else {
             withContext(Dispatchers.IO) {
-                runCatching {
-                    BitmapFactory.decodeFile(state.path)?.asImageBitmap()
-                }.getOrNull()
+                ThumbnailImageCache.loadFile(state.path, maxSizePx = 160)
             }
         }
     }
@@ -4844,6 +5109,7 @@ private fun ClientsScreen(
     viewModel: AppViewModel,
     clients: List<ClientEntity>,
     appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     financeTransactions: List<FinanceTransactionEntity>,
     subScreen: ClientSubScreen,
     selectedClientId: Long?,
@@ -4868,7 +5134,7 @@ private fun ClientsScreen(
             ClientDetailScreen(
                 viewModel = viewModel,
                 client = selectedClient,
-                appointments = appointments.filter { it.clientId == selectedClient.id },
+                appointments = appointmentIndex.byClientId[selectedClient.id].orEmpty(),
                 financeTransactions = financeTransactions,
                 onBack = { onSubScreenChange(ClientSubScreen.List) },
                 onOpenAppointment = onOpenAppointment,
@@ -4879,16 +5145,22 @@ private fun ClientsScreen(
     }
 
     var query by remember { mutableStateOf("") }
-    val filteredClients = clients
-        .filter {
-            query.isBlank() ||
-                it.name.contains(query, ignoreCase = true) ||
-                it.phone.contains(query, ignoreCase = true) ||
-                it.email.contains(query, ignoreCase = true) ||
-                it.company.contains(query, ignoreCase = true)
+    val groupedClients by remember(clients, query) {
+        derivedStateOf {
+            clients
+                .asSequence()
+                .filter {
+                    query.isBlank() ||
+                        it.name.contains(query, ignoreCase = true) ||
+                        it.phone.contains(query, ignoreCase = true) ||
+                        it.email.contains(query, ignoreCase = true) ||
+                        it.company.contains(query, ignoreCase = true)
+                }
+                .sortedBy { it.name.lowercase(Locale.getDefault()) }
+                .groupBy { clientSection(it.name) }
+                .toSortedMap()
         }
-        .sortedBy { it.name.lowercase(Locale.getDefault()) }
-    val groupedClients = filteredClients.groupBy { clientSection(it.name) }.toSortedMap()
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -4929,7 +5201,7 @@ private fun ClientsScreen(
                     modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
                 )
             }
-            if (filteredClients.isEmpty()) {
+            if (groupedClients.isEmpty()) {
                 item { EmptyText(if (query.isBlank()) "Пока нет клиентов." else "Ничего не найдено.") }
             } else {
                 groupedClients.forEach { (section, group) ->
@@ -5362,11 +5634,7 @@ private fun ClientPhotoButton(photoUri: String, displayName: String, onClick: ()
             null
         } else {
             withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(Uri.parse(photoUri))?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }.getOrNull()
+                ThumbnailImageCache.loadUri(context.applicationContext, photoUri, maxSizePx = 256)
             }
         }
     }
@@ -5841,11 +6109,7 @@ private fun LargeContactAvatar(name: String, photoUri: String) {
             null
         } else {
             withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(Uri.parse(photoUri))?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }.getOrNull()
+                ThumbnailImageCache.loadUri(context.applicationContext, photoUri, maxSizePx = 96)
             }
         }
     }
@@ -5987,72 +6251,15 @@ private fun ClientFinanceSection(
     val totals = remember(client.id, appointments, transactions) {
         clientFinanceTotals(client.id, appointments, transactions)
     }
-    ContactDetailGroup {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Icon(Icons.Filled.Payments, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("Финансы", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-        Column(
-            modifier = Modifier.padding(start = 58.dp, end = 18.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.fillMaxWidth()) {
-                ClientFinanceMetric("Начислено", totals.accruedCents, Modifier.weight(1f))
-                ClientFinanceMetric("Оплачено", totals.paidCents, Modifier.weight(1f))
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.fillMaxWidth()) {
-                ClientFinanceMetric("Долг", totals.debtCents, Modifier.weight(1f), emphasize = totals.debtCents > 0)
-                ClientFinanceMetric("Расходы", totals.expenseCents, Modifier.weight(1f))
-            }
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.secondaryContainer
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Итого",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        formatMoney(totals.totalCents),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ClientFinanceMetric(
-    label: String,
-    amountCents: Long,
-    modifier: Modifier = Modifier,
-    emphasize: Boolean = false
-) {
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            formatMoney(amountCents),
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = if (emphasize) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+    FinanceOverviewCard(
+        title = "Финансы клиента",
+        summary = FinanceSummary(
+            accruedCents = totals.accruedCents,
+            paidCents = totals.paidCents,
+            debtCents = totals.debtCents,
+            expenseCents = totals.expenseCents
         )
-    }
+    )
 }
 
 @Composable
@@ -6213,6 +6420,7 @@ private fun AppointmentsScreen(
     viewModel: AppViewModel,
     clients: List<ClientEntity>,
     appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     services: List<ServiceEntity>,
     financeTransactions: List<FinanceTransactionEntity>,
     requestedAppointmentId: Long?,
@@ -6231,16 +6439,24 @@ private fun AppointmentsScreen(
 
     var calendarView by rememberSaveable { mutableStateOf(AppointmentCalendarView.Month) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
+    var calendarSwipeAnimationDirection by remember { mutableStateOf(0) }
+    var calendarSwipeAnimationToken by remember { mutableStateOf(0) }
+    var calendarSwipeAnimationTarget by remember { mutableStateOf(SwipeAnimationTarget.Full) }
+    var monthPreviewSwipeAnimationDirection by remember { mutableStateOf(0) }
+    var monthPreviewSwipeAnimationToken by remember { mutableStateOf(0) }
 
     var showCreateSheet by remember { mutableStateOf(false) }
     var showClientPicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
+    var showCalendarDatePicker by remember { mutableStateOf(false) }
+    var showAppointmentSearch by remember { mutableStateOf(false) }
     var showTimePicker by remember { mutableStateOf(false) }
     var serviceCreatorTargetId by remember { mutableStateOf<Int?>(null) }
     var selectedAppointmentId by remember { mutableStateOf<Long?>(null) }
     var selectedClientProfileId by remember { mutableStateOf<Long?>(null) }
     var monthPreviewDate by remember { mutableStateOf<LocalDate?>(null) }
     var monthPreviewAppointmentId by remember { mutableStateOf<Long?>(null) }
+    var calendarReturnView by remember { mutableStateOf<AppointmentCalendarView?>(null) }
     var editingAppointmentId by remember { mutableStateOf<Long?>(null) }
     var movingAppointmentId by remember { mutableStateOf<Long?>(null) }
     var appointmentConflict by remember { mutableStateOf<AppointmentConflictAction?>(null) }
@@ -6357,6 +6573,23 @@ private fun AppointmentsScreen(
         monthPreviewAppointmentId = null
     }
 
+    fun openDayFromMonth(date: LocalDate) {
+        calendarReturnView = calendarView
+        selectedDate = date
+        calendarView = AppointmentCalendarView.Day
+    }
+
+    fun markCalendarSwipe(direction: Int, target: SwipeAnimationTarget = SwipeAnimationTarget.Full) {
+        calendarSwipeAnimationTarget = target
+        calendarSwipeAnimationDirection = direction
+        calendarSwipeAnimationToken++
+    }
+
+    fun markMonthPreviewSwipe(direction: Int) {
+        monthPreviewSwipeAnimationDirection = direction
+        monthPreviewSwipeAnimationToken++
+    }
+
     fun openAppointmentEditor(appointment: AppointmentRow) {
         val parsedDateTime = parseAppointmentDateTime(appointment.startAt)
         editingAppointmentId = appointment.id
@@ -6420,20 +6653,46 @@ private fun AppointmentsScreen(
         resetDraft()
     }
 
-    val visibleAppointments = appointments
-    val selectedAppointment = remember(selectedAppointmentId, appointments) {
-        selectedAppointmentId?.let { id -> appointments.firstOrNull { it.id == id } }
+    val visibleAppointments = appointmentIndex.appointments
+    val selectedAppointment = remember(selectedAppointmentId, appointmentIndex) {
+        selectedAppointmentId?.let { id -> appointmentIndex.byId[id] }
     }
     val selectedClientProfile = remember(selectedClientProfileId, clients) {
         selectedClientProfileId?.let { id -> clients.firstOrNull { it.id == id } }
     }
-    val movingAppointment = remember(movingAppointmentId, appointments) {
-        movingAppointmentId?.let { id -> appointments.firstOrNull { it.id == id } }
+    val movingAppointment = remember(movingAppointmentId, appointmentIndex) {
+        movingAppointmentId?.let { id -> appointmentIndex.byId[id] }
+    }
+    val fullSwipeAnimationDirection =
+        if (calendarSwipeAnimationTarget == SwipeAnimationTarget.Full) calendarSwipeAnimationDirection else 0
+    val fullSwipeAnimationToken =
+        if (calendarSwipeAnimationTarget == SwipeAnimationTarget.Full) calendarSwipeAnimationToken else 0
+    val agendaSwipeAnimationDirection =
+        if (calendarSwipeAnimationTarget == SwipeAnimationTarget.Agenda) calendarSwipeAnimationDirection else 0
+    val agendaSwipeAnimationToken =
+        if (calendarSwipeAnimationTarget == SwipeAnimationTarget.Agenda) calendarSwipeAnimationToken else 0
+    val financeRange = remember(calendarView, selectedDate) {
+        financeRangeForCalendarView(calendarView, selectedDate)
+    }
+    val periodFinanceSummary by produceState(
+        initialValue = FinanceSummary(0, 0, 0, 0),
+        appointmentIndex,
+        financeTransactions,
+        financeRange
+    ) {
+        value = withContext(Dispatchers.Default) {
+            financeSummaryForRange(
+                appointmentIndex = appointmentIndex,
+                transactions = financeTransactions,
+                startDate = financeRange.first,
+                endDate = financeRange.second
+            )
+        }
     }
 
-    LaunchedEffect(requestedAppointmentId, appointments) {
+    LaunchedEffect(requestedAppointmentId, appointmentIndex) {
         val requestedId = requestedAppointmentId ?: return@LaunchedEffect
-        if (appointments.any { it.id == requestedId }) {
+        if (appointmentIndex.byId.containsKey(requestedId)) {
             selectedAppointmentId = requestedId
             showCreateSheet = false
             showClientPicker = false
@@ -6442,9 +6701,9 @@ private fun AppointmentsScreen(
         }
     }
 
-    LaunchedEffect(requestedAppointmentEditId, appointments) {
+    LaunchedEffect(requestedAppointmentEditId, appointmentIndex) {
         val requestedId = requestedAppointmentEditId ?: return@LaunchedEffect
-        val requestedAppointment = appointments.firstOrNull { it.id == requestedId } ?: return@LaunchedEffect
+        val requestedAppointment = appointmentIndex.byId[requestedId] ?: return@LaunchedEffect
         openAppointmentEditor(requestedAppointment)
         onRequestedAppointmentEditConsumed()
     }
@@ -6457,15 +6716,24 @@ private fun AppointmentsScreen(
         }
     }
 
-    BackHandler(enabled = showCreateSheet || selectedClientProfileId != null || selectedAppointmentId != null || monthPreviewDate != null) {
+    BackHandler(
+        enabled = showCreateSheet ||
+            selectedClientProfileId != null ||
+            selectedAppointmentId != null ||
+            monthPreviewDate != null ||
+            calendarReturnView != null
+    ) {
         if (monthPreviewDate != null) {
             closeMonthDayPreview()
         } else if (selectedClientProfileId != null) {
             selectedClientProfileId = null
         } else if (showCreateSheet) {
             requestCloseEditor()
-        } else {
+        } else if (selectedAppointmentId != null) {
             closeAppointmentDetails()
+        } else if (calendarReturnView != null) {
+            calendarView = calendarReturnView ?: calendarView
+            calendarReturnView = null
         }
     }
 
@@ -6474,13 +6742,12 @@ private fun AppointmentsScreen(
             AppointmentsCalendarHeader(
                 calendarView = calendarView,
                 selectedDate = selectedDate,
-                onPreviousPeriod = {
-                    selectedDate = selectedDate.shiftCalendarPeriod(calendarView, -1)
+                onViewChange = {
+                    calendarReturnView = null
+                    calendarView = it
                 },
-                onNextPeriod = {
-                    selectedDate = selectedDate.shiftCalendarPeriod(calendarView, 1)
-                },
-                onViewChange = { calendarView = it }
+                onSearchClick = { showAppointmentSearch = true },
+                onDatePickerClick = { showCalendarDatePicker = true }
             )
 
             if (clients.isEmpty()) {
@@ -6494,22 +6761,49 @@ private fun AppointmentsScreen(
                     AppointmentCalendarView.Week -> AppointmentTimelineView(
                         calendarView = calendarView,
                         selectedDate = selectedDate,
-                        appointments = visibleAppointments,
+                        appointmentIndex = appointmentIndex,
                         hasCalendarPermissions = hasCalendarPermissions,
+                        financeSummary = periodFinanceSummary,
+                        financeTitle = financeSummaryTitle(calendarView),
+                        swipeAnimationDirection = fullSwipeAnimationDirection,
+                        swipeAnimationToken = fullSwipeAnimationToken,
                         onAppointmentClick = { openAppointmentDetails(it) },
-                        onEmptySlotClick = { date, time -> openNewAppointmentAt(date, time) }
+                        onEmptySlotClick = { date, time -> openNewAppointmentAt(date, time) },
+                        onPeriodSwipe = { direction ->
+                            markCalendarSwipe(direction)
+                            selectedDate = selectedDate.shiftCalendarPeriod(calendarView, direction)
+                        }
                     )
                     AppointmentCalendarView.Month -> AppointmentMonthView(
                         selectedDate = selectedDate,
-                        appointments = visibleAppointments,
+                        appointmentIndex = appointmentIndex,
+                        financeSummary = periodFinanceSummary,
+                        fullSwipeAnimationDirection = fullSwipeAnimationDirection,
+                        fullSwipeAnimationToken = fullSwipeAnimationToken,
+                        agendaSwipeAnimationDirection = agendaSwipeAnimationDirection,
+                        agendaSwipeAnimationToken = agendaSwipeAnimationToken,
                         onExpandedAppointmentClick = { openMonthDayPreview(it) },
                         onCollapsedAppointmentClick = { openAppointmentDetails(it) },
                         onExpandedDayClick = {
-                            selectedDate = it
-                            calendarView = AppointmentCalendarView.Day
+                            openDayFromMonth(it)
                         },
                         onCollapsedDayClick = {
                             selectedDate = it
+                        },
+                        onMonthSwipe = { direction ->
+                            markCalendarSwipe(direction)
+                            selectedDate = selectedDate.plusMonths(direction.toLong())
+                        },
+                        onWeekSwipe = { direction ->
+                            markCalendarSwipe(direction)
+                            selectedDate = selectedDate.startOfWeek().plusWeeks(direction.toLong())
+                        },
+                        onAgendaDaySwipe = { direction, animateFull ->
+                            markCalendarSwipe(
+                                direction = direction,
+                                target = if (animateFull) SwipeAnimationTarget.Full else SwipeAnimationTarget.Agenda
+                            )
+                            selectedDate = selectedDate.plusDays(direction.toLong())
                         }
                     )
                 }
@@ -6517,15 +6811,40 @@ private fun AppointmentsScreen(
         }
 
         monthPreviewDate?.let { previewDate ->
+            val previewFinanceSummary by produceState(
+                initialValue = FinanceSummary(0, 0, 0, 0),
+                appointmentIndex,
+                financeTransactions,
+                previewDate
+            ) {
+                value = withContext(Dispatchers.Default) {
+                    financeSummaryForRange(
+                        appointmentIndex = appointmentIndex,
+                        transactions = financeTransactions,
+                        startDate = previewDate,
+                        endDate = previewDate
+                    )
+                }
+            }
             AppointmentMonthDaySheet(
                 date = previewDate,
-                appointments = visibleAppointments,
+                dayAppointments = appointmentIndex.parsedByDate[previewDate].orEmpty(),
                 selectedAppointmentId = monthPreviewAppointmentId,
                 hasCalendarPermissions = hasCalendarPermissions,
+                financeSummary = previewFinanceSummary,
+                swipeAnimationDirection = monthPreviewSwipeAnimationDirection,
+                swipeAnimationToken = monthPreviewSwipeAnimationToken,
                 onDismiss = { closeMonthDayPreview() },
                 onAppointmentClick = { appointment ->
                     closeMonthDayPreview()
                     openAppointmentDetails(appointment)
+                },
+                onDateSwipe = { direction ->
+                    markMonthPreviewSwipe(direction)
+                    val nextDate = previewDate.plusDays(direction.toLong())
+                    monthPreviewDate = nextDate
+                    monthPreviewAppointmentId = null
+                    selectedDate = nextDate
                 },
                 onCreateAppointment = { date ->
                     closeMonthDayPreview()
@@ -6655,6 +6974,19 @@ private fun AppointmentsScreen(
         }
     }
 
+    if (showAppointmentSearch) {
+        AppointmentSearchSheet(
+            appointmentIndex = appointmentIndex,
+            onDismiss = { showAppointmentSearch = false },
+            onAppointmentClick = { parsedAppointment ->
+                showAppointmentSearch = false
+                calendarReturnView = null
+                selectedDate = parsedAppointment.start.toLocalDate()
+                openAppointmentDetails(parsedAppointment.appointment)
+            }
+        )
+    }
+
     movingAppointment?.let { appointment ->
         AppointmentMoveSheet(
             appointment = appointment,
@@ -6777,6 +7109,29 @@ private fun AppointmentsScreen(
         }
     }
 
+    if (showCalendarDatePicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDate.toPickerMillis())
+        DatePickerDialog(
+            onDismissRequest = { showCalendarDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pickerState.selectedDateMillis?.let {
+                            selectedDate = pickerMillisToLocalDate(it)
+                            calendarReturnView = null
+                        }
+                        showCalendarDatePicker = false
+                    }
+                ) { Text("ОК") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCalendarDatePicker = false }) { Text("Отмена") }
+            }
+        ) {
+            DatePicker(state = pickerState)
+        }
+    }
+
     if (showTimePicker) {
         val parsedTime = remember(appointmentTime) {
             runCatching { LocalTime.parse(appointmentTime) }.getOrElse { LocalTime.of(10, 0) }
@@ -6814,9 +7169,9 @@ private fun AppointmentsScreen(
 private fun AppointmentsCalendarHeader(
     calendarView: AppointmentCalendarView,
     selectedDate: LocalDate,
-    onPreviousPeriod: () -> Unit,
-    onNextPeriod: () -> Unit,
-    onViewChange: (AppointmentCalendarView) -> Unit
+    onViewChange: (AppointmentCalendarView) -> Unit,
+    onSearchClick: () -> Unit,
+    onDatePickerClick: () -> Unit
 ) {
     var viewMenuExpanded by remember { mutableStateOf(false) }
     Surface(
@@ -6831,17 +7186,18 @@ private fun AppointmentsCalendarHeader(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onPreviousPeriod) {
-                    Icon(Icons.Filled.ChevronLeft, contentDescription = "Предыдущий период")
-                }
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    TextButton(onClick = { viewMenuExpanded = true }) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    TextButton(
+                        onClick = { viewMenuExpanded = true },
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp)
+                    ) {
                         Text(
                             calendarPeriodTitle(calendarView, selectedDate),
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Icon(Icons.Filled.ExpandMore, contentDescription = "Выбрать вид")
                     }
@@ -6857,9 +7213,158 @@ private fun AppointmentsCalendarHeader(
                         }
                     }
                 }
-                IconButton(onClick = onNextPeriod) {
-                    Icon(Icons.Filled.ChevronRight, contentDescription = "Следующий период")
+                IconButton(onClick = onSearchClick) {
+                    Icon(Icons.Filled.Search, contentDescription = "Поиск записей")
                 }
+                IconButton(onClick = onDatePickerClick) {
+                    Icon(Icons.Filled.DateRange, contentDescription = "Выбрать дату")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun AppointmentSearchSheet(
+    appointmentIndex: AppointmentIndex,
+    onDismiss: () -> Unit,
+    onAppointmentClick: (ParsedAppointmentRow) -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val today = LocalDate.now()
+    val searchResults = remember(query, appointmentIndex, today) {
+        val needle = query.trim()
+        if (needle.isBlank()) {
+            appointmentIndex.parsed
+                .asSequence()
+                .filter { !it.start.toLocalDate().isBefore(today) }
+                .sortedBy { it.start }
+                .take(30)
+                .toList()
+        } else {
+            appointmentIndex.parsed
+                .asSequence()
+                .filter { it.appointment.matchesAppointmentSearch(needle) }
+                .sortedByDescending { it.start }
+                .take(80)
+                .toList()
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.78f)
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Поиск записей",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                }
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                placeholder = { Text("Клиент, услуга, заметка") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                if (query.isBlank()) "Ближайшие записи" else "Найдено: ${searchResults.size}",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (searchResults.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    EmptyText(if (query.isBlank()) "Ближайших записей нет." else "Ничего не найдено.")
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(searchResults, key = { it.appointment.id }) { parsedAppointment ->
+                        AppointmentSearchResultRow(
+                            parsedAppointment = parsedAppointment,
+                            onClick = { onAppointmentClick(parsedAppointment) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentSearchResultRow(
+    parsedAppointment: ParsedAppointmentRow,
+    onClick: () -> Unit
+) {
+    val appointment = parsedAppointment.appointment
+    val isCancelled = appointmentIsCancelled(appointment)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(appointmentMonthAccentColor(appointment))
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    "${if (isCancelled) "Отменена: " else ""}${appointment.service.ifBlank { "Запись" }}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    appointment.clientName.ifBlank { "Без клиента" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${formatAppointmentDateForUi(parsedAppointment.start.toLocalDate())} · ${appointmentTimeRange(appointment)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -6869,18 +7374,35 @@ private fun AppointmentsCalendarHeader(
 private fun AppointmentTimelineView(
     calendarView: AppointmentCalendarView,
     selectedDate: LocalDate,
-    appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     hasCalendarPermissions: Boolean,
+    financeSummary: FinanceSummary,
+    financeTitle: String,
+    swipeAnimationDirection: Int,
+    swipeAnimationToken: Int,
     onAppointmentClick: (AppointmentRow) -> Unit,
-    onEmptySlotClick: (LocalDate, LocalTime) -> Unit
+    onEmptySlotClick: (LocalDate, LocalTime) -> Unit,
+    onPeriodSwipe: (Int) -> Unit
 ) {
     val dates = visibleTimelineDates(calendarView, selectedDate)
     val hourHeight = 82.dp
     val timelineHeight = hourHeight * 24
-    Column(modifier = Modifier.fillMaxSize()) {
+    val horizontalSwipeThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
+    val swipeRestartKey = calendarView to selectedDate
+    val periodAppointmentCount = remember(dates, appointmentIndex) {
+        dates.sumOf { date -> appointmentIndex.parsedByDate[date].orEmpty().size }
+    }
+    SwipeAnimatedContent(
+        animationKey = calendarView to selectedDate,
+        direction = swipeAnimationDirection,
+        token = swipeAnimationToken,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalPeriodSwipe(horizontalSwipeThresholdPx, swipeRestartKey, onPeriodSwipe)
                 .padding(start = 56.dp, end = 8.dp, top = 8.dp, bottom = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -6906,6 +7428,7 @@ private fun AppointmentTimelineView(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .horizontalPeriodSwipe(horizontalSwipeThresholdPx, swipeRestartKey, onPeriodSwipe)
                 .verticalScroll(rememberScrollState())
         ) {
             Box(
@@ -6959,14 +7482,11 @@ private fun AppointmentTimelineView(
                                 .fillMaxHeight()
                                 .padding(horizontal = 1.dp)
                         ) {
-                            appointments
-                                .mapNotNull { appointment ->
-                                    parseAppointmentDateTime(appointment.startAt)
-                                        ?.takeIf { it.toLocalDate() == date }
-                                        ?.let { start -> appointment to start }
-                                }
-                                .sortedBy { it.second.toLocalTime() }
-                                .forEach { (appointment, start) ->
+                            appointmentIndex.parsedByDate[date]
+                                .orEmpty()
+                                .forEach { parsedAppointment ->
+                                    val appointment = parsedAppointment.appointment
+                                    val start = parsedAppointment.start
                                     val startMinute = start.hour * 60 + start.minute
                                     val visibleDuration = appointment.durationMinutes
                                         .coerceAtLeast(15)
@@ -6988,9 +7508,36 @@ private fun AppointmentTimelineView(
                     }
                 }
             }
+            AppointmentPeriodCountLine(
+                calendarView = calendarView,
+                count = periodAppointmentCount,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)
+            )
+            AppointmentCalendarFinanceSummaryBlock(
+                title = financeTitle,
+                summary = financeSummary,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)
+            )
             Spacer(Modifier.height(96.dp))
         }
     }
+    }
+}
+
+@Composable
+private fun AppointmentPeriodCountLine(
+    calendarView: AppointmentCalendarView,
+    count: Int,
+    modifier: Modifier = Modifier
+) {
+    Text(
+        text = appointmentPeriodCountText(calendarView, count),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier.fillMaxWidth()
+    )
 }
 
 @Composable
@@ -7037,34 +7584,168 @@ private fun AppointmentTimelineCard(
 }
 
 @Composable
+private fun AppointmentCalendarFinanceSummaryBlock(
+    title: String,
+    summary: FinanceSummary,
+    modifier: Modifier = Modifier
+) {
+    FinanceOverviewCard(
+        title = title,
+        summary = summary,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun FinanceOverviewCard(
+    title: String,
+    summary: FinanceSummary,
+    modifier: Modifier = Modifier
+) {
+    val totalColor = when {
+        summary.totalCents < 0 -> MaterialTheme.colorScheme.error
+        summary.totalCents > 0 -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        tonalElevation = 1.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Payments,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(21.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "Оплачено ${formatMoney(summary.paidCents)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        "Итого",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        formatMoney(summary.totalCents),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = totalColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    FinanceOverviewMetric("Начислено", summary.accruedCents, Modifier.weight(1f))
+                    FinanceOverviewMetric("Долг", summary.debtCents, Modifier.weight(1f), warning = summary.debtCents > 0)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    FinanceOverviewMetric("Расходы", summary.expenseCents, Modifier.weight(1f), warning = summary.expenseCents > 0)
+                    FinanceOverviewMetric("Оплачено", summary.paidCents, Modifier.weight(1f), positive = summary.paidCents > 0)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FinanceOverviewMetric(
+    label: String,
+    amountCents: Long,
+    modifier: Modifier = Modifier,
+    positive: Boolean = false,
+    warning: Boolean = false
+) {
+    val amountColor = when {
+        warning && amountCents != 0L -> MaterialTheme.colorScheme.error
+        positive && amountCents != 0L -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                formatMoney(amountCents),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = amountColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun AppointmentMonthDaySheet(
     date: LocalDate,
-    appointments: List<AppointmentRow>,
+    dayAppointments: List<ParsedAppointmentRow>,
     selectedAppointmentId: Long?,
     hasCalendarPermissions: Boolean,
+    financeSummary: FinanceSummary,
+    swipeAnimationDirection: Int,
+    swipeAnimationToken: Int,
     onDismiss: () -> Unit,
     onAppointmentClick: (AppointmentRow) -> Unit,
+    onDateSwipe: (Int) -> Unit,
     onCreateAppointment: (LocalDate) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scrollState = rememberScrollState()
     val density = LocalDensity.current
+    val horizontalSwipeThresholdPx = with(density) { 64.dp.toPx() }
     val hourHeight = 72.dp
-    val dayAppointments = remember(date, appointments) {
-        appointments
-            .mapNotNull { appointment ->
-                parseAppointmentDateTime(appointment.startAt)
-                    ?.takeIf { it.toLocalDate() == date }
-                    ?.let { start -> appointment to start }
-            }
-            .sortedBy { it.second.toLocalTime() }
-    }
     LaunchedEffect(date, selectedAppointmentId, dayAppointments) {
         val selectedStart = dayAppointments
-            .firstOrNull { it.first.id == selectedAppointmentId }
-            ?.second
-            ?: dayAppointments.firstOrNull()?.second
+            .firstOrNull { it.appointment.id == selectedAppointmentId }
+            ?.start
+            ?: dayAppointments.firstOrNull()?.start
         val startMinute = selectedStart?.let { it.hour * 60 + it.minute } ?: 9 * 60
         val targetPx = with(density) {
             (hourHeight.toPx() * (startMinute / 60f) - 72.dp.toPx()).toInt()
@@ -7078,113 +7759,135 @@ private fun AppointmentMonthDaySheet(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface
     ) {
-        Column(
+        SwipeAnimatedContent(
+            animationKey = "month-day-sheet" to date,
+            direction = swipeAnimationDirection,
+            token = swipeAnimationToken,
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.86f)
-                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .horizontalPeriodSwipe(horizontalSwipeThresholdPx, date, onDateSwipe)
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "${date.dayOfMonth} ${date.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, ruLocale)}",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        date.format(dayMonthFormatter),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Filled.Close, contentDescription = "Закрыть")
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .verticalScroll(scrollState)
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(hourHeight * 24)
-                        .padding(vertical = 8.dp)
-                ) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        (0..23).forEach { hour ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(hourHeight)
-                                    .padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Text(
-                                    hour.toString(),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .width(34.dp)
-                                        .padding(top = 2.dp)
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(top = 8.dp)
-                                        .height(1.dp)
-                                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                                )
-                            }
-                        }
-                    }
-                    dayAppointments.forEach { (appointment, start) ->
-                        val startMinute = start.hour * 60 + start.minute
-                        val visibleDuration = appointment.durationMinutes
-                            .coerceAtLeast(15)
-                            .coerceAtMost((24 * 60 - startMinute).coerceAtLeast(15))
-                        val topOffset = hourHeight * (startMinute / 60f)
-                        val cardHeight = (hourHeight * (visibleDuration / 60f)).coerceAtLeast(44.dp)
-                        AppointmentTimelineCard(
-                            appointment = appointment,
-                            hasCalendarPermissions = hasCalendarPermissions,
-                            onClick = onAppointmentClick,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .offset(y = topOffset)
-                                .height(cardHeight)
-                                .padding(start = 48.dp, end = 8.dp, top = 2.dp, bottom = 2.dp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            date.format(dayMonthFormatter),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            date.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, ruLocale),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    if (dayAppointments.isEmpty()) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "Закрыть")
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .verticalScroll(scrollState)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(top = hourHeight * 9),
-                            contentAlignment = Alignment.Center
+                                .height(hourHeight * 24)
+                                .padding(vertical = 8.dp)
                         ) {
-                            Text(
-                                "На этот день записей нет",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                (0..23).forEach { hour ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(hourHeight)
+                                            .padding(horizontal = 8.dp),
+                                        verticalAlignment = Alignment.Top
+                                    ) {
+                                        Text(
+                                            hour.toString(),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier
+                                                .width(34.dp)
+                                                .padding(top = 2.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(top = 8.dp)
+                                                .height(1.dp)
+                                                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                                        )
+                                    }
+                                }
+                            }
+                            dayAppointments.forEach { parsedAppointment ->
+                                val appointment = parsedAppointment.appointment
+                                val start = parsedAppointment.start
+                                val startMinute = start.hour * 60 + start.minute
+                                val visibleDuration = appointment.durationMinutes
+                                    .coerceAtLeast(15)
+                                    .coerceAtMost((24 * 60 - startMinute).coerceAtLeast(15))
+                                val topOffset = hourHeight * (startMinute / 60f)
+                                val cardHeight = (hourHeight * (visibleDuration / 60f)).coerceAtLeast(44.dp)
+                                AppointmentTimelineCard(
+                                    appointment = appointment,
+                                    hasCalendarPermissions = hasCalendarPermissions,
+                                    onClick = onAppointmentClick,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .offset(y = topOffset)
+                                        .height(cardHeight)
+                                        .padding(start = 48.dp, end = 8.dp, top = 2.dp, bottom = 2.dp)
+                                )
+                            }
+                            if (dayAppointments.isEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = hourHeight * 9),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "На этот день записей нет",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
+                        AppointmentPeriodCountLine(
+                            calendarView = AppointmentCalendarView.Day,
+                            count = dayAppointments.size,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp)
+                        )
+                        AppointmentCalendarFinanceSummaryBlock(
+                            title = "Финансы за день",
+                            summary = financeSummary,
+                            modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp)
+                        )
                     }
                 }
-            }
-            Button(
-                onClick = { onCreateAppointment(date) },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
-                contentPadding = PaddingValues(vertical = 14.dp)
-            ) {
-                Text("Добавить на ${date.format(dayMonthFormatter)}")
-                Spacer(Modifier.width(8.dp))
-                Icon(Icons.Filled.Add, contentDescription = null)
+                Button(
+                    onClick = { onCreateAppointment(date) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    contentPadding = PaddingValues(vertical = 14.dp)
+                ) {
+                    Text("Добавить на ${date.format(dayMonthFormatter)}")
+                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                }
             }
         }
     }
@@ -7193,11 +7896,19 @@ private fun AppointmentMonthDaySheet(
 @Composable
 private fun AppointmentMonthView(
     selectedDate: LocalDate,
-    appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
+    financeSummary: FinanceSummary,
+    fullSwipeAnimationDirection: Int,
+    fullSwipeAnimationToken: Int,
+    agendaSwipeAnimationDirection: Int,
+    agendaSwipeAnimationToken: Int,
     onExpandedAppointmentClick: (AppointmentRow) -> Unit,
     onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
     onExpandedDayClick: (LocalDate) -> Unit,
-    onCollapsedDayClick: (LocalDate) -> Unit
+    onCollapsedDayClick: (LocalDate) -> Unit,
+    onMonthSwipe: (Int) -> Unit,
+    onWeekSwipe: (Int) -> Unit,
+    onAgendaDaySwipe: (Int, Boolean) -> Unit
 ) {
     val firstDay = selectedDate.withDayOfMonth(1)
     val gridStart = firstDay.minusDays((firstDay.dayOfWeek.value - 1).toLong())
@@ -7209,70 +7920,93 @@ private fun AppointmentMonthView(
         (0 until visibleDayCount).map { gridStart.plusDays(it.toLong()) }
     }
     val weeks = remember(days) { days.chunked(7) }
-    val appointmentsByDate = remember(appointments) {
-        appointments
-            .mapNotNull { appointment ->
-                parseAppointmentDateTime(appointment.startAt)
-                    ?.let { start -> appointment to start }
-            }
-            .groupBy { it.second.toLocalDate() }
-            .mapValues { entry ->
-                entry.value
-                    .sortedBy { it.second.toLocalTime() }
-                    .map { it.first }
-            }
+    val selectedDayAppointments = remember(selectedDate, appointmentIndex) {
+        appointmentIndex.byDate[selectedDate].orEmpty()
     }
-    val selectedDayAppointments = remember(selectedDate, appointmentsByDate) {
-        appointmentsByDate[selectedDate].orEmpty()
-    }
-    val collapsedListState = rememberLazyListState()
+    val collapsedScrollState = rememberScrollState()
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     if (isLandscape) {
-        AppointmentMonthLandscapeContent(
-            selectedDate = selectedDate,
-            selectedDayAppointments = selectedDayAppointments,
-            weeks = weeks,
-            appointmentsByDate = appointmentsByDate,
-            listState = collapsedListState,
-            onAppointmentClick = onCollapsedAppointmentClick,
-            onDayClick = onCollapsedDayClick
-        )
+        SwipeAnimatedContent(
+            animationKey = "month-landscape" to selectedDate,
+            direction = fullSwipeAnimationDirection,
+            token = fullSwipeAnimationToken,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            AppointmentMonthLandscapeContent(
+                selectedDate = selectedDate,
+                selectedDayAppointments = selectedDayAppointments,
+                weeks = weeks,
+                appointmentsByDate = appointmentIndex.byDate,
+                financeSummary = financeSummary,
+                scrollState = collapsedScrollState,
+                onAppointmentClick = onCollapsedAppointmentClick,
+                onDayClick = onCollapsedDayClick,
+                onCalendarSwipe = onMonthSwipe,
+                onAgendaSwipe = onAgendaDaySwipe
+            )
+        }
         return
     }
     val density = LocalDensity.current
     val collapseThresholdPx = with(density) { 56.dp.toPx() }
-    var isCollapsed by rememberSaveable { mutableStateOf(false) }
+    var monthModeIndex by rememberSaveable { mutableStateOf(AppointmentMonthMode.Expanded.ordinal) }
+    val monthMode = AppointmentMonthMode.values()[monthModeIndex.coerceIn(
+        AppointmentMonthMode.Expanded.ordinal,
+        AppointmentMonthMode.SuperCollapsed.ordinal
+    )]
     var gestureDistance by remember { mutableStateOf(0f) }
     val collapseProgress by animateFloatAsState(
-        targetValue = if (isCollapsed) 1f else 0f,
+        targetValue = monthModeIndex.toFloat(),
         animationSpec = tween(durationMillis = 340, easing = FastOutSlowInEasing),
         label = "Month collapse progress"
     )
-    fun collapsedListAtTop(): Boolean =
-        collapsedListState.firstVisibleItemIndex == 0 &&
-            collapsedListState.firstVisibleItemScrollOffset == 0
-
-    val monthCollapseConnection = remember(isCollapsed, collapseThresholdPx, collapsedListState) {
+    fun agendaAtTop(): Boolean =
+        collapsedScrollState.value <= 2
+    fun moveMonthMode(direction: Int) {
+        monthModeIndex = (monthModeIndex + direction).coerceIn(
+            AppointmentMonthMode.Expanded.ordinal,
+            AppointmentMonthMode.SuperCollapsed.ordinal
+        )
+        gestureDistance = 0f
+    }
+    val monthCollapseConnection = remember(monthModeIndex, collapseThresholdPx, collapsedScrollState) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (!isCollapsed && available.y < 0f) {
+                if (monthModeIndex < AppointmentMonthMode.SuperCollapsed.ordinal && available.y < 0f) {
                     gestureDistance += -available.y
                     if (gestureDistance >= collapseThresholdPx) {
-                        isCollapsed = true
-                        gestureDistance = 0f
+                        moveMonthMode(1)
                     }
                 } else if (
-                    isCollapsed &&
+                    monthModeIndex > AppointmentMonthMode.Expanded.ordinal &&
                     available.y > 0f &&
-                    collapsedListAtTop()
+                    monthModeIndex < AppointmentMonthMode.SuperCollapsed.ordinal
                 ) {
                     gestureDistance += available.y
                     if (gestureDistance >= collapseThresholdPx) {
-                        isCollapsed = false
-                        gestureDistance = 0f
+                        moveMonthMode(-1)
                     }
                 } else {
                     gestureDistance = 0f
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                if (
+                    monthModeIndex == AppointmentMonthMode.SuperCollapsed.ordinal &&
+                    available.y > 0f &&
+                    agendaAtTop()
+                ) {
+                    gestureDistance += available.y
+                    if (gestureDistance >= collapseThresholdPx) {
+                        moveMonthMode(-1)
+                    }
+                    return Offset(0f, available.y)
                 }
                 return Offset.Zero
             }
@@ -7283,26 +8017,26 @@ private fun AppointmentMonthView(
         modifier = Modifier
             .fillMaxSize()
             .nestedScroll(monthCollapseConnection)
-            .pointerInput(isCollapsed, collapseThresholdPx) {
+            .pointerInput(monthModeIndex, collapseThresholdPx) {
                 detectVerticalDragGestures(
                     onDragEnd = { gestureDistance = 0f },
                     onDragCancel = { gestureDistance = 0f },
                     onVerticalDrag = { change, dragAmount ->
                         when {
-                            !isCollapsed && dragAmount < 0f -> {
+                            monthModeIndex < AppointmentMonthMode.SuperCollapsed.ordinal && dragAmount < 0f -> {
                                 gestureDistance += -dragAmount
                                 change.consume()
                                 if (gestureDistance >= collapseThresholdPx) {
-                                    isCollapsed = true
-                                    gestureDistance = 0f
+                                    moveMonthMode(1)
                                 }
                             }
-                            isCollapsed && dragAmount > 0f && collapsedListAtTop() -> {
+                            monthModeIndex > AppointmentMonthMode.Expanded.ordinal &&
+                                dragAmount > 0f &&
+                                (monthModeIndex < AppointmentMonthMode.SuperCollapsed.ordinal || agendaAtTop()) -> {
                                 gestureDistance += dragAmount
                                 change.consume()
                                 if (gestureDistance >= collapseThresholdPx) {
-                                    isCollapsed = false
-                                    gestureDistance = 0f
+                                    moveMonthMode(-1)
                                 }
                             }
                         }
@@ -7314,14 +8048,22 @@ private fun AppointmentMonthView(
             selectedDate = selectedDate,
             selectedDayAppointments = selectedDayAppointments,
             weeks = weeks,
-            appointmentsByDate = appointmentsByDate,
-            listState = collapsedListState,
+            appointmentsByDate = appointmentIndex.byDate,
+            financeSummary = financeSummary,
+            scrollState = collapsedScrollState,
             collapseProgress = collapseProgress,
-            isCollapsed = isCollapsed,
+            monthMode = monthMode,
+            fullSwipeAnimationDirection = fullSwipeAnimationDirection,
+            fullSwipeAnimationToken = fullSwipeAnimationToken,
+            agendaSwipeAnimationDirection = agendaSwipeAnimationDirection,
+            agendaSwipeAnimationToken = agendaSwipeAnimationToken,
             onExpandedAppointmentClick = onExpandedAppointmentClick,
             onCollapsedAppointmentClick = onCollapsedAppointmentClick,
             onExpandedDayClick = onExpandedDayClick,
             onCollapsedDayClick = onCollapsedDayClick,
+            onMonthSwipe = onMonthSwipe,
+            onWeekSwipe = onWeekSwipe,
+            onAgendaSwipe = onAgendaDaySwipe,
             modifier = Modifier.fillMaxSize()
         )
     }
@@ -7333,10 +8075,14 @@ private fun AppointmentMonthLandscapeContent(
     selectedDayAppointments: List<AppointmentRow>,
     weeks: List<List<LocalDate>>,
     appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
-    listState: androidx.compose.foundation.lazy.LazyListState,
+    financeSummary: FinanceSummary,
+    scrollState: ScrollState,
     onAppointmentClick: (AppointmentRow) -> Unit,
-    onDayClick: (LocalDate) -> Unit
+    onDayClick: (LocalDate) -> Unit,
+    onCalendarSwipe: (Int) -> Unit,
+    onAgendaSwipe: (Int, Boolean) -> Unit
 ) {
+    val horizontalSwipeThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
     Row(
         modifier = Modifier
             .fillMaxSize()
@@ -7354,6 +8100,7 @@ private fun AppointmentMonthLandscapeContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .horizontalPeriodSwipe(horizontalSwipeThresholdPx, selectedDate, onCalendarSwipe)
             ) {
                 weeks.forEach { week ->
                     Row(
@@ -7383,39 +8130,44 @@ private fun AppointmentMonthLandscapeContent(
                 .fillMaxHeight()
                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
         )
-        LazyColumn(
-            state = listState,
+        Column(
             modifier = Modifier
                 .weight(1.05f)
-                .fillMaxHeight(),
-            contentPadding = PaddingValues(bottom = 80.dp),
+                .fillMaxHeight()
+                .horizontalPeriodSwipe(horizontalSwipeThresholdPx, selectedDate) { direction ->
+                    val nextDate = selectedDate.plusDays(direction.toLong())
+                    onAgendaSwipe(direction, nextDate.month != selectedDate.month)
+                }
+                .verticalScroll(scrollState),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            item {
-                AppointmentMonthSelectedDayHeader(
-                    date = selectedDate,
-                    appointmentCount = selectedDayAppointments.size
-                )
-            }
+            AppointmentMonthSelectedDayHeader(
+                date = selectedDate,
+                appointmentCount = selectedDayAppointments.size
+            )
             if (selectedDayAppointments.isEmpty()) {
-                item {
-                    Text(
-                        "На этот день записей нет",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 18.dp)
-                    )
-                }
+                Text(
+                    "На этот день записей нет",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 18.dp)
+                )
             } else {
-                items(selectedDayAppointments, key = { it.id }) { appointment ->
+                selectedDayAppointments.forEach { appointment ->
                     AppointmentMonthAgendaRow(
                         appointment = appointment,
                         onClick = onAppointmentClick
                     )
                 }
             }
+            AppointmentCalendarFinanceSummaryBlock(
+                title = "Финансы за день",
+                summary = financeSummary,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp)
+            )
+            Spacer(Modifier.height(80.dp))
         }
     }
 }
@@ -7426,56 +8178,109 @@ private fun AppointmentMonthPortraitMorphContent(
     selectedDayAppointments: List<AppointmentRow>,
     weeks: List<List<LocalDate>>,
     appointmentsByDate: Map<LocalDate, List<AppointmentRow>>,
-    listState: androidx.compose.foundation.lazy.LazyListState,
+    financeSummary: FinanceSummary,
+    scrollState: ScrollState,
     collapseProgress: Float,
-    isCollapsed: Boolean,
+    monthMode: AppointmentMonthMode,
+    fullSwipeAnimationDirection: Int,
+    fullSwipeAnimationToken: Int,
+    agendaSwipeAnimationDirection: Int,
+    agendaSwipeAnimationToken: Int,
     onExpandedAppointmentClick: (AppointmentRow) -> Unit,
     onCollapsedAppointmentClick: (AppointmentRow) -> Unit,
     onExpandedDayClick: (LocalDate) -> Unit,
     onCollapsedDayClick: (LocalDate) -> Unit,
+    onMonthSwipe: (Int) -> Unit,
+    onWeekSwipe: (Int) -> Unit,
+    onAgendaSwipe: (Int, Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val progress = collapseProgress.coerceIn(0f, 1f)
-    Column(
+    val progress = collapseProgress.coerceIn(0f, 2f)
+    val compactProgress = progress.coerceIn(0f, 1f)
+    val superProgress = (progress - 1f).coerceIn(0f, 1f)
+    val showAgenda = compactProgress > 0.01f || monthMode != AppointmentMonthMode.Expanded
+    val horizontalSwipeThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
+    val today = remember { LocalDate.now() }
+    SwipeAnimatedContent(
+        animationKey = "month-portrait-full" to selectedDate,
+        direction = fullSwipeAnimationDirection,
+        token = fullSwipeAnimationToken,
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 6.dp, vertical = 8.dp)
     ) {
-        AppointmentMonthWeekHeader()
-        Spacer(Modifier.height(6.dp))
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-        ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            AppointmentMonthWeekHeader()
+            Spacer(Modifier.height(6.dp))
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
             val weekCount = weeks.size.coerceAtLeast(1)
             val compactRowHeight = maxWidth / 7f
-            val compactGridHeight = compactRowHeight * weekCount
-            val targetGridHeight = if (compactGridHeight.value > maxHeight.value) maxHeight else compactGridHeight
-            val gridHeight = lerpDp(maxHeight, targetGridHeight, progress)
+            val expandedRowHeight = maxHeight / weekCount
+            val selectedWeekIndex = remember(weeks, selectedDate) {
+                weeks.indexOfFirst { week -> selectedDate in week }.takeIf { it >= 0 } ?: 0
+            }
+            val baseRowHeight = lerpDp(expandedRowHeight, compactRowHeight, compactProgress)
+            val rowHeights = weeks.mapIndexed { index, _ ->
+                if (index == selectedWeekIndex) {
+                    baseRowHeight
+                } else {
+                    lerpDp(baseRowHeight, 0.dp, superProgress)
+                }
+            }
+            val gridHeight = rowHeights.fold(0.dp) { total, rowHeight -> total + rowHeight }
+            val dayNumberShiftPx = with(LocalDensity.current) {
+                (maxWidth / 7f).toPx() * 0.34f * compactProgress
+            }
             Column(modifier = Modifier.fillMaxSize()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(gridHeight)
+                        .horizontalPeriodSwipe(
+                            thresholdPx = horizontalSwipeThresholdPx,
+                            restartKey = monthMode
+                        ) { direction ->
+                            if (monthMode == AppointmentMonthMode.SuperCollapsed) {
+                                onWeekSwipe(direction)
+                            } else {
+                                onMonthSwipe(direction)
+                            }
+                        }
                 ) {
-                    weeks.forEach { week ->
+                    weeks.forEachIndexed { weekIndex, week ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f)
+                                .height(rowHeights[weekIndex])
+                                .graphicsLayer {
+                                    alpha = if (weekIndex == selectedWeekIndex) {
+                                        1f
+                                    } else {
+                                        1f - superProgress
+                                    }
+                                }
                         ) {
                             week.forEach { day ->
                                 AppointmentMonthMorphDayCell(
                                     day = day,
+                                    today = today,
                                     selectedDate = selectedDate,
                                     selectedMonth = selectedDate.month,
                                     appointments = appointmentsByDate[day].orEmpty(),
-                                    collapseProgress = progress,
-                                    appointmentClicksEnabled = !isCollapsed,
+                                    collapseProgress = compactProgress,
+                                    dayNumberShiftPx = dayNumberShiftPx,
+                                    appointmentClicksEnabled = monthMode == AppointmentMonthMode.Expanded,
                                     onAppointmentClick = onExpandedAppointmentClick,
                                     onDateClick = {
-                                        if (isCollapsed) onCollapsedDayClick(day) else onExpandedDayClick(day)
+                                        if (monthMode == AppointmentMonthMode.Expanded) {
+                                            onExpandedDayClick(day)
+                                        } else {
+                                            onCollapsedDayClick(day)
+                                        }
                                     },
                                     modifier = Modifier
                                         .weight(1f)
@@ -7485,66 +8290,96 @@ private fun AppointmentMonthPortraitMorphContent(
                         }
                     }
                 }
-                Spacer(Modifier.height(lerpDp(0.dp, 12.dp, progress)))
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
+                Spacer(Modifier.height(lerpDp(0.dp, 12.dp, compactProgress)))
+                if (showAgenda) {
+                    var agendaModifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .horizontalPeriodSwipe(horizontalSwipeThresholdPx, selectedDate) { direction ->
+                            val nextDate = selectedDate.plusDays(direction.toLong())
+                            val animateFull = when (monthMode) {
+                                AppointmentMonthMode.SuperCollapsed -> nextDate.startOfWeek() != selectedDate.startOfWeek()
+                                else -> nextDate.month != selectedDate.month
+                            }
+                            onAgendaSwipe(direction, animateFull)
+                        }
                         .graphicsLayer {
-                            alpha = progress
-                            translationY = 22f * (1f - progress)
-                        },
-                    contentPadding = PaddingValues(bottom = 96.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    item {
-                        AppointmentMonthSelectedDayHeader(
-                            date = selectedDate,
-                            appointmentCount = selectedDayAppointments.size
-                        )
-                    }
-                    if (selectedDayAppointments.isEmpty()) {
-                        item {
-                            Text(
-                                "На этот день записей нет",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 18.dp)
-                            )
+                            alpha = compactProgress
+                            translationY = 22f * (1f - compactProgress)
                         }
+                    agendaModifier = if (monthMode == AppointmentMonthMode.SuperCollapsed) {
+                        agendaModifier.verticalScroll(scrollState)
                     } else {
-                        items(selectedDayAppointments, key = { it.id }) { appointment ->
-                            AppointmentMonthAgendaRow(
-                                appointment = appointment,
-                                onClick = onCollapsedAppointmentClick
+                        agendaModifier.clipToBounds()
+                    }
+                    SwipeAnimatedContent(
+                        animationKey = "month-agenda" to selectedDate,
+                        direction = agendaSwipeAnimationDirection,
+                        token = agendaSwipeAnimationToken,
+                        modifier = agendaModifier,
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            AppointmentMonthSelectedDayHeader(
+                                date = selectedDate,
+                                appointmentCount = selectedDayAppointments.size
                             )
+                            if (selectedDayAppointments.isEmpty()) {
+                                Text(
+                                    "На этот день записей нет",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 18.dp)
+                                )
+                            } else {
+                                selectedDayAppointments.forEach { appointment ->
+                                    AppointmentMonthAgendaRow(
+                                        appointment = appointment,
+                                        onClick = onCollapsedAppointmentClick
+                                    )
+                                }
+                            }
+                            AppointmentCalendarFinanceSummaryBlock(
+                                title = "Финансы за день",
+                                summary = financeSummary,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
+                            Spacer(Modifier.height(96.dp))
                         }
                     }
+                } else {
+                    Spacer(Modifier.weight(1f))
                 }
             }
         }
+    }
     }
 }
 
 @Composable
 private fun AppointmentMonthMorphDayCell(
     day: LocalDate,
+    today: LocalDate,
     selectedDate: LocalDate,
     selectedMonth: java.time.Month,
     appointments: List<AppointmentRow>,
     collapseProgress: Float,
+    dayNumberShiftPx: Float,
     appointmentClicksEnabled: Boolean,
     onAppointmentClick: (AppointmentRow) -> Unit,
     onDateClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val progress = collapseProgress.coerceIn(0f, 1f)
-    val isToday = day == LocalDate.now()
+    val isToday = day == today
     val isSelected = day == selectedDate
     val inMonth = day.month == selectedMonth
+    val expandedAppointments = remember(appointments) { appointments.take(3) }
+    val stripeAppointments = remember(appointments) { appointments.take(4) }
     val expandedBackground = if (isToday) {
         MaterialTheme.colorScheme.primaryContainer
     } else {
@@ -7578,13 +8413,11 @@ private fun AppointmentMonthMorphDayCell(
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onDateClick)
     ) {
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
-            val density = LocalDensity.current
-            val numberShiftPx = with(density) { maxWidth.toPx() * 0.34f * progress }
             Text(
                 day.dayOfMonth.toString(),
                 style = MaterialTheme.typography.labelLarge,
@@ -7594,7 +8427,7 @@ private fun AppointmentMonthMorphDayCell(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .graphicsLayer {
-                        translationX = numberShiftPx
+                        translationX = dayNumberShiftPx
                         translationY = -2f * progress
                     }
             )
@@ -7611,7 +8444,7 @@ private fun AppointmentMonthMorphDayCell(
                         },
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    appointments.take(3).forEach { appointment ->
+                    expandedAppointments.forEach { appointment ->
                         val isCancelled = appointment.status == APPOINTMENT_STATUS_CANCELLED
                         Surface(
                             color = when {
@@ -7668,7 +8501,7 @@ private fun AppointmentMonthMorphDayCell(
                     },
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                appointments.take(4).forEach { appointment ->
+                stripeAppointments.forEach { appointment ->
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.82f)
@@ -8123,6 +8956,80 @@ private fun appointmentMonthAccentColor(appointment: AppointmentRow): Color =
 
 private fun lerpDp(start: Dp, stop: Dp, fraction: Float): Dp =
     (start.value + (stop.value - start.value) * fraction.coerceIn(0f, 1f)).dp
+
+@Composable
+private fun SwipeAnimatedContent(
+    animationKey: Any?,
+    direction: Int,
+    token: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val density = LocalDensity.current
+    val offsetX = remember { Animatable(0f) }
+    val alphaAnim = remember { Animatable(1f) }
+    var lastToken by remember { mutableStateOf(token) }
+    LaunchedEffect(animationKey, token) {
+        val shouldAnimate = token != lastToken && direction != 0
+        lastToken = token
+        if (shouldAnimate) {
+            val startOffset = with(density) { 28.dp.toPx() } * direction.coerceIn(-1, 1)
+            offsetX.snapTo(startOffset)
+            alphaAnim.snapTo(0.72f)
+            launch {
+                offsetX.animateTo(
+                    targetValue = 0f,
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
+                )
+            }
+            alphaAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing)
+            )
+        }
+    }
+    Box(
+        modifier = modifier.graphicsLayer {
+            translationX = offsetX.value
+            alpha = alphaAnim.value
+        }
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun Modifier.horizontalPeriodSwipe(
+    thresholdPx: Float,
+    restartKey: Any? = Unit,
+    onSwipe: (Int) -> Unit
+): Modifier {
+    val latestOnSwipe by rememberUpdatedState(onSwipe)
+    return pointerInput(thresholdPx, restartKey) {
+        var distance = 0f
+        var delivered = false
+        detectHorizontalDragGestures(
+            onDragEnd = {
+                distance = 0f
+                delivered = false
+            },
+            onDragCancel = {
+                distance = 0f
+                delivered = false
+            },
+            onHorizontalDrag = { change, dragAmount ->
+                change.consume()
+                if (!delivered) {
+                    distance += dragAmount
+                    if (abs(distance) >= thresholdPx) {
+                        delivered = true
+                        latestOnSwipe(if (distance > 0f) -1 else 1)
+                    }
+                }
+            }
+        )
+    }
+}
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -9250,11 +10157,16 @@ data class FinanceJournalItem(
     val isDebt: Boolean = false
 )
 
+private data class FinanceUiState(
+    val summary: FinanceSummary = FinanceSummary(0, 0, 0, 0),
+    val journalItems: List<FinanceJournalItem> = emptyList()
+)
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun FinanceScreen(
     viewModel: AppViewModel,
-    appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     transactions: List<FinanceTransactionEntity>,
     onEditorOpenChange: (Boolean) -> Unit
 ) {
@@ -9276,21 +10188,32 @@ private fun FinanceScreen(
     var paymentMethod by remember { mutableStateOf(paymentMethodOptions.first()) }
     var paymentDate by remember { mutableStateOf(LocalDate.now()) }
 
-    val summary = remember(appointments, transactions, selectedMonth) {
-        financeSummaryForMonth(appointments, transactions, selectedMonth)
-    }
-    val journalItems = remember(appointments, transactions, selectedMonth, filter) {
-        financeJournalForMonth(appointments, transactions, selectedMonth)
-            .filter { item ->
-                when (filter) {
-                    "Доходы" -> item.kind == FINANCE_TYPE_INCOME
-                    "Расходы" -> item.kind == FINANCE_TYPE_EXPENSE
-                    "Долги" -> item.isDebt
-                    else -> true
+    val financeUiState by produceState(
+        initialValue = FinanceUiState(),
+        appointmentIndex,
+        transactions,
+        selectedMonth,
+        filter
+    ) {
+        value = withContext(Dispatchers.Default) {
+            val journalItems = financeJournalForMonth(appointmentIndex, transactions, selectedMonth)
+                .filter { item ->
+                    when (filter) {
+                        "Доходы" -> item.kind == FINANCE_TYPE_INCOME
+                        "Расходы" -> item.kind == FINANCE_TYPE_EXPENSE
+                        "Долги" -> item.isDebt
+                        else -> true
+                    }
                 }
-            }
-            .sortedWith(compareByDescending<FinanceJournalItem> { parseFinanceLocalDate(it.date) ?: LocalDate.MIN }.thenByDescending { it.key })
+                .sortedWith(compareByDescending<FinanceJournalItem> { parseFinanceLocalDate(it.date) ?: LocalDate.MIN }.thenByDescending { it.key })
+            FinanceUiState(
+                summary = financeSummaryForMonth(appointmentIndex, transactions, selectedMonth),
+                journalItems = journalItems
+            )
+        }
     }
+    val summary = financeUiState.summary
+    val journalItems = financeUiState.journalItems
 
     fun openTransactionEditor() {
         showTransactionSheet = true
@@ -10599,6 +11522,7 @@ private fun AutomationConfirmationDialog(
 private fun BackupSettingsSection(viewModel: AppViewModel) {
     val context = LocalContext.current
     val autoBackup = viewModel.autoBackupState
+    val counts by viewModel.counts.collectAsStateWithLifecycle()
     val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) viewModel.exportBackup(context, uri)
     }
@@ -10647,10 +11571,10 @@ private fun BackupSettingsSection(viewModel: AppViewModel) {
     }
     InfoCard {
         Text("В базе сейчас", fontWeight = FontWeight.Bold)
-        Text("Клиентов: ${viewModel.counts.clients}")
-        Text("Записей: ${viewModel.counts.appointments}")
-        Text("Сценариев: ${viewModel.counts.rules}")
-        Text("Задач в очереди: ${viewModel.counts.outbox}")
+        Text("Клиентов: ${counts.clients}")
+        Text("Записей: ${counts.appointments}")
+        Text("Сценариев: ${counts.rules}")
+        Text("Задач в очереди: ${counts.outbox}")
     }
     Button(
         onClick = { createBackup.launch("offline-beauty-crm-backup-${fileStamp()}.json") },
@@ -11446,11 +12370,7 @@ private fun ContactAvatar(name: String, photoUri: String, modifier: Modifier = M
             null
         } else {
             withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(Uri.parse(photoUri))?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }.getOrNull()
+                ThumbnailImageCache.loadUri(context.applicationContext, photoUri, maxSizePx = 96)
             }
         }
     }
@@ -11539,21 +12459,22 @@ private fun normalizePhone(value: String): String {
 }
 
 private fun parseAppointmentMillis(value: String): Long? {
-    val formats = listOf("yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss")
-    return formats.firstNotNullOfOrNull { pattern ->
-        runCatching {
-            SimpleDateFormat(pattern, Locale.US).apply { isLenient = false }.parse(value.trim())?.time
-        }.getOrNull()
-    }
+    return parseAppointmentDateTime(value)
+        ?.atZone(ZoneId.systemDefault())
+        ?.toInstant()
+        ?.toEpochMilli()
 }
 
 private fun formatAppointmentMillis(value: Long): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(value))
+    Instant.ofEpochMilli(value)
+        .atZone(ZoneId.systemDefault())
+        .toLocalDateTime()
+        .format(appointmentStorageFormatter)
 
-private fun parseAppointmentDateTime(value: String): LocalDateTime? {
-    val millis = parseAppointmentMillis(value) ?: return null
-    return Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDateTime()
-}
+internal fun parseAppointmentDateTime(value: String): LocalDateTime? =
+    appointmentStorageInputFormatters.firstNotNullOfOrNull { formatter ->
+        runCatching { LocalDateTime.parse(value.trim(), formatter) }.getOrNull()
+    }
 
 private fun formatAppointmentLocalDateTime(date: LocalDate, time: String): String {
     val parsedTime = runCatching { LocalTime.parse(time) }.getOrDefault(LocalTime.of(10, 0))
@@ -11667,14 +12588,16 @@ private fun clientFinanceTotals(
 }
 
 private fun financeSummaryForMonth(
-    appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     transactions: List<FinanceTransactionEntity>,
     selectedMonth: LocalDate
 ): FinanceSummary {
-    val monthAppointments = appointments.filter { isInFinanceMonth(parseAppointmentDateTime(it.startAt)?.toLocalDate(), selectedMonth) }
+    val monthAppointments = appointmentIndex.parsed
+        .filter { isInFinanceMonth(it.start.toLocalDate(), selectedMonth) }
+        .map { it.appointment }
     val accrued = monthAppointments.sumOf { appointmentBillableCents(it) }
     val debt = monthAppointments.sumOf { appointmentRemainingCents(it) }
-    val appointmentPaid = appointments
+    val appointmentPaid = appointmentIndex.appointments
         .filter { it.paidAmountCents > 0 && isInFinanceMonth(parseFinanceLocalDate(it.paidAt), selectedMonth) }
         .sumOf { it.paidAmountCents }
     val manualIncome = transactions
@@ -11691,13 +12614,65 @@ private fun financeSummaryForMonth(
     )
 }
 
+private fun financeRangeForCalendarView(
+    calendarView: AppointmentCalendarView,
+    selectedDate: LocalDate
+): Pair<LocalDate, LocalDate> = when (calendarView) {
+    AppointmentCalendarView.Day,
+    AppointmentCalendarView.Month -> selectedDate to selectedDate
+    AppointmentCalendarView.ThreeDays -> selectedDate to selectedDate.plusDays(2)
+    AppointmentCalendarView.Week -> {
+        val start = selectedDate.startOfWeek()
+        start to start.plusDays(6)
+    }
+}
+
+private fun financeSummaryTitle(calendarView: AppointmentCalendarView): String = when (calendarView) {
+    AppointmentCalendarView.Day,
+    AppointmentCalendarView.Month -> "Финансы за день"
+    AppointmentCalendarView.ThreeDays -> "Финансы за 3 дня"
+    AppointmentCalendarView.Week -> "Финансы за неделю"
+}
+
+private fun isInFinanceRange(date: LocalDate?, startDate: LocalDate, endDate: LocalDate): Boolean =
+    date != null && !date.isBefore(startDate) && !date.isAfter(endDate)
+
+private fun financeSummaryForRange(
+    appointmentIndex: AppointmentIndex,
+    transactions: List<FinanceTransactionEntity>,
+    startDate: LocalDate,
+    endDate: LocalDate
+): FinanceSummary {
+    val rangeAppointments = appointmentIndex.parsed
+        .filter { isInFinanceRange(it.start.toLocalDate(), startDate, endDate) }
+        .map { it.appointment }
+    val accrued = rangeAppointments.sumOf { appointmentBillableCents(it) }
+    val debt = rangeAppointments.sumOf { appointmentRemainingCents(it) }
+    val appointmentPaid = appointmentIndex.appointments
+        .filter { it.paidAmountCents > 0 && isInFinanceRange(parseFinanceLocalDate(it.paidAt), startDate, endDate) }
+        .sumOf { it.paidAmountCents }
+    val manualIncome = transactions
+        .filter { it.type == FINANCE_TYPE_INCOME && isInFinanceRange(parseFinanceLocalDate(it.date), startDate, endDate) }
+        .sumOf { it.amountCents }
+    val expenses = transactions
+        .filter { it.type == FINANCE_TYPE_EXPENSE && isInFinanceRange(parseFinanceLocalDate(it.date), startDate, endDate) }
+        .sumOf { it.amountCents }
+    return FinanceSummary(
+        accruedCents = accrued,
+        paidCents = appointmentPaid + manualIncome,
+        debtCents = debt,
+        expenseCents = expenses
+    )
+}
+
 private fun financeJournalForMonth(
-    appointments: List<AppointmentRow>,
+    appointmentIndex: AppointmentIndex,
     transactions: List<FinanceTransactionEntity>,
     selectedMonth: LocalDate
 ): List<FinanceJournalItem> = buildList {
-    appointments.forEach { appointment ->
-        val appointmentDate = parseAppointmentDateTime(appointment.startAt)?.toLocalDate()
+    appointmentIndex.parsed.forEach { parsedAppointment ->
+        val appointment = parsedAppointment.appointment
+        val appointmentDate = parsedAppointment.start.toLocalDate()
         if (appointment.priceCents > 0 && appointment.paidAmountCents > 0 && isInFinanceMonth(parseFinanceLocalDate(appointment.paidAt), selectedMonth)) {
             add(
                 FinanceJournalItem(
@@ -11749,6 +12724,9 @@ private fun LocalDate.toPickerMillis(): Long =
 private fun pickerMillisToLocalDate(value: Long): LocalDate =
     Instant.ofEpochMilli(value).atZone(ZoneOffset.UTC).toLocalDate()
 
+private fun LocalDate.startOfWeek(): LocalDate =
+    minusDays((dayOfWeek.value - 1).toLong())
+
 private fun LocalDate.shiftCalendarPeriod(calendarView: AppointmentCalendarView, direction: Int): LocalDate {
     val step = direction.toLong()
     return when (calendarView) {
@@ -11799,6 +12777,27 @@ private fun appointmentTimeRange(appointment: AppointmentRow): String {
     val start = parseAppointmentDateTime(appointment.startAt) ?: return appointment.startAt
     val end = start.plusMinutes(appointment.durationMinutes.coerceAtLeast(15).toLong())
     return "${start.toLocalTime()}-${end.toLocalTime()}"
+}
+
+private fun appointmentPeriodCountText(calendarView: AppointmentCalendarView, count: Int): String {
+    val period = when (calendarView) {
+        AppointmentCalendarView.Day -> "за день"
+        AppointmentCalendarView.ThreeDays -> "за 3 дня"
+        AppointmentCalendarView.Week -> "за неделю"
+        AppointmentCalendarView.Month -> "за период"
+    }
+    return "$count ${appointmentCountWord(count)} $period"
+}
+
+private fun appointmentCountWord(count: Int): String {
+    val mod100 = count % 100
+    val mod10 = count % 10
+    return when {
+        mod100 in 11..14 -> "записей"
+        mod10 == 1 -> "запись"
+        mod10 in 2..4 -> "записи"
+        else -> "записей"
+    }
 }
 
 private fun findAppointmentConflict(
@@ -11972,13 +12971,11 @@ private fun formatGitHubPublishedAt(value: String): String {
     }.getOrDefault(value)
 }
 
-private fun now(): String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-private fun fileStamp(): String = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+private fun now(): String = LocalDateTime.now().format(appointmentStorageSecondsFormatter)
+private fun fileStamp(): String = LocalDateTime.now().format(fileStampFormatter)
 
 private fun timestampMillis(value: String): Long =
-    runCatching {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply { isLenient = false }.parse(value.trim())?.time ?: 0L
-    }.getOrDefault(0L)
+    parseAppointmentMillis(value) ?: 0L
 
 private fun defaultSyncSetting(resource: String): SyncSettingsEntity =
     SyncSettingsEntity(resource = resource, mode = SYNC_MODE_TWO_WAY)

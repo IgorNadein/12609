@@ -1,75 +1,90 @@
-**Idioma:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a>
+</p>
 
-# 12609 - Offline Service CRM
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="12609 — Offline Service CRM" width="100%">
+</p>
 
-12609 es una aplicacion Android nativa de CRM para profesionales independientes de servicios y pequenos negocios que trabajan con citas. La aplicacion esta disenada para trabajo local offline-first: clientes, citas, servicios, finanzas, sincronizacion con contactos y calendario de Android, automatizacion orientada a SMS, JSON backup/import y comprobacion de actualizaciones APK.
+<h1 align="center">12609 · Offline Service CRM</h1>
+<p align="center"><strong>Clientes, citas y finanzas. Juntos en tu dispositivo Android.</strong></p>
 
-El proyecto demuestra desarrollo de producto Android con Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, integraciones del sistema, almacenamiento local-first y GitHub Actions CI.
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><img src="https://img.shields.io/github/v/release/IgorNadein/12609?style=flat-square&amp;color=c21159" alt="GitHub release"></a>
+  <a href="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml"><img src="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml/badge.svg" alt="Android Release APK"></a>
+  <img src="https://img.shields.io/badge/Android-8.0%2B-3d8061?style=flat-square" alt="Android 8.0+">
+  <img src="https://img.shields.io/badge/Kotlin-2.0.21-7f52ff?style=flat-square" alt="Kotlin 2.0.21">
+</p>
 
-## Funciones
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><strong>Descargar APK</strong></a> ·
+  <a href="https://github.com/IgorNadein/12609/releases">Versiones</a> ·
+  <a href="docs/DEVELOPMENT.md">Compilación y desarrollo</a> ·
+  <a href="https://github.com/IgorNadein/12609/issues">Informar de un error</a>
+</p>
 
-- Base de clientes con enlace opcional a contactos del sistema Android.
-- Calendario de citas con vistas de dia, 3 dias, semana y mes.
-- Modos de sincronizacion con Android Contacts y Calendar.
-- Catalogo de servicios con precio y duracion.
-- Finanzas locales: pagos, deudas, ingresos y gastos.
-- Cola de automatizacion y SMS-oriented workflows.
-- JSON backup e import para datos locales.
-- Flujo de comprobacion de actualizaciones basado en GitHub Releases, configurable para signed APK distribution.
+Una aplicación CRM nativa para Android, pensada para profesionales independientes y pequeños negocios que trabajan con citas. Gestiona el día a día de forma local y conecta los contactos y el calendario de Android si lo necesitas.
 
-## Stack tecnico
+## Así es la aplicación
 
-- Language: Kotlin.
-- UI: Jetpack Compose y Material 3.
-- Database: Room sobre SQLite.
-- Background work: WorkManager.
-- Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions signed release APK build.
+<table>
+  <tr><th>Clientes</th><th>Citas</th><th>Finanzas</th></tr>
+  <tr>
+    <td width="33%"><img src="docs/screenshots/clients.png" alt="Clientes" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/appointments.png" alt="Citas" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/finances.png" alt="Finanzas" width="100%"></td>
+  </tr>
+</table>
 
-## Estructura del proyecto
+Capturas reales de la versión 0.4.0 en un emulador Android con datos ficticios. La interfaz está actualmente en ruso; las traducciones del README están enlazadas arriba.
 
-```text
-offline-beauty-crm/   Android application module
-build-logs/           Local build logs, ignored by Git
-test-artifacts/       Local test artifacts, ignored by Git
-```
+## Para el trabajo diario
 
-## Build local
+| | |
+| :--- | :--- |
+| **Clientes** | Fichas de clientes, datos de contacto y notas, con vinculación opcional a los contactos de Android. |
+| **Citas** | Vistas de día, tres días, semana y mes. Gestión de servicios, duración de las citas y días libres. |
+| **Servicios y finanzas** | Catálogo de precios y duración, registro de pagos, deudas, ingresos y gastos. |
+| **Automatización** | Flujos de SMS con cola de tareas y opciones de confirmación. |
+| **Copias y actualizaciones** | Exportación e importación de JSON, copias automáticas configurables y búsqueda de actualizaciones APK en GitHub Releases. |
 
-El proyecto requiere Android SDK y Gradle compatible con Android Gradle Plugin `8.11.1`.
+### Almacenamiento local por defecto
+
+Los datos del CRM se guardan en una base Room/SQLite del dispositivo. La gestión diaria funciona sin conexión. Las integraciones usan los proveedores de contactos y calendario de Android; las cuentas vinculadas pueden sincronizarse mediante sus propios servicios. Los SMS requieren compatibilidad del dispositivo y permiso. La consulta de versiones y la descarga del APK necesitan internet.
+
+## Probar la aplicación
+
+1. Abre la [última versión](https://github.com/IgorNadein/12609/releases/latest) y descarga el archivo `.apk` de **Assets**.
+2. Instálalo en Android 8.0 o posterior. Si se solicita, permite la instalación desde la aplicación con la que abres el APK.
+3. Añade un cliente, crea un servicio y programa una cita. Configura las integraciones opcionales y las copias de seguridad en Ajustes.
+
+> Este repositorio es un proyecto de portafolio. Los APK publicados usan una clave de firma que se incluyó anteriormente en Git y debe considerarse comprometida. Usa una clave nueva para distribución en producción. Consulta la [guía de firma](docs/DEVELOPMENT.md#release-signing).
+
+## Tecnologías
+
+**Kotlin** · **Jetpack Compose** · **Material 3** · **Room / SQLite** · **Coroutines / Flow** · **WorkManager** · **GitHub Actions**
+
+## Explorar el código
+
+La mayor parte de la interfaz, la base de datos y las integraciones se encuentra actualmente en `MainActivity.kt`. Los índices del calendario y las funciones de rendimiento están en `PerformanceState.kt`.
+
+- [MainActivity.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/MainActivity.kt)
+- [PerformanceState.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/PerformanceState.kt)
+- [PerformanceStateTest.kt](offline-beauty-crm/app/src/test/java/com/offlinebeautycrm/PerformanceStateTest.kt)
+- [Android Release APK](.github/workflows/android-release.yml)
+
+## Compilación local
+
+Necesitas **JDK 17**, **Gradle 8.14.3** y **Android SDK Platform 36**. El repositorio todavía no incluye Gradle wrapper.
 
 ```bash
-cd offline-beauty-crm
+git clone https://github.com/IgorNadein/12609.git
+cd 12609/offline-beauty-crm
 gradle :app:assembleDebug
 ```
 
-El repositorio todavia no incluye Gradle wrapper, por lo que el build local depende de una distribucion Gradle instalada o Android Studio.
+Consulta la [guía de desarrollo](docs/DEVELOPMENT.md), en inglés, para configurar el SDK, ejecutar pruebas unitarias y compilar versiones firmadas.
 
-## Release CI
+## Comentarios
 
-GitHub Actions puede construir y publicar un signed release APK desde `master`:
-
-```bash
-gradle :app:assembleRelease
-```
-
-El workflow restaura el signing keystore desde GitHub Actions Secrets, construye un signed release APK, crea un GitHub Release y sube el APK asset. La aplicacion puede usar el ultimo GitHub Release para su flujo de comprobacion de actualizaciones.
-
-## Release Signing
-
-Release signing se configura solo mediante environment variables y GitHub Actions Secrets:
-
-- `SIGNING_STORE_FILE`
-- `SIGNING_STORE_PASSWORD`
-- `SIGNING_KEY_ALIAS`
-- `SIGNING_KEY_PASSWORD`
-- `KEYSTORE_BASE64`
-- `KEYSTORE_PASSWORD`
-- `KEY_ALIAS`
-- `KEY_PASSWORD`
-
-Signing keys, keystores, APK locales, generated build folders, test artifacts y local logs estan excluidos de Git.
-
-## Security Notes
-
-Esta version publica esta preparada como portfolio snapshot. El update key se almacena solo en GitHub Actions Secrets, por lo que los dispositivos de prueba firmados con la clave APK anterior pueden seguir recibiendo actualizaciones mediante GitHub Releases. Como esta clave estuvo antes en Git, debe seguir considerandose comprometida y no debe reutilizarse para una distribucion real de produccion.
+¿Encontraste un problema o tienes una idea? [Abre un issue](https://github.com/IgorNadein/12609/issues). Incluye las versiones de la aplicación y de Android y los pasos para reproducirlo. Usa datos ficticios en los ejemplos.

@@ -1,75 +1,90 @@
-**Language:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a>
+</p>
 
-# 12609 - Offline Service CRM
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="12609 — Offline Service CRM" width="100%">
+</p>
 
-12609 is a native Android CRM for independent service professionals and appointment-based small businesses. The application is built for offline-first local work: clients, appointments, services, finance records, system contact/calendar synchronization, SMS task automation, JSON backup/import, and APK update checks.
+<h1 align="center">12609 · Offline Service CRM</h1>
+<p align="center"><strong>Clients, appointments and finances. Together on your Android device.</strong></p>
 
-The project demonstrates Android product development with Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, system integrations, local-first data storage, and GitHub Actions CI.
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><img src="https://img.shields.io/github/v/release/IgorNadein/12609?style=flat-square&amp;color=c21159" alt="GitHub release"></a>
+  <a href="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml"><img src="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml/badge.svg" alt="Android Release APK"></a>
+  <img src="https://img.shields.io/badge/Android-8.0%2B-3d8061?style=flat-square" alt="Android 8.0+">
+  <img src="https://img.shields.io/badge/Kotlin-2.0.21-7f52ff?style=flat-square" alt="Kotlin 2.0.21">
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><strong>Download APK</strong></a> ·
+  <a href="https://github.com/IgorNadein/12609/releases">Releases</a> ·
+  <a href="docs/DEVELOPMENT.md">Build & development</a> ·
+  <a href="https://github.com/IgorNadein/12609/issues">Report an issue</a>
+</p>
 
-- Client database with optional links to Android system contacts.
-- Appointment calendar with day, 3-day, week, and month views.
-- Synchronization modes for Android contacts and calendar events.
-- Service catalog with prices and duration.
-- Local finance tracking: payments, debts, income, and expenses.
-- Automation task queue and SMS-oriented workflows.
-- JSON backup and import for local data.
-- Update-checking flow based on GitHub Releases, configurable for signed APK distribution.
+A native Android CRM for independent service professionals and small businesses that work by appointment. Manage everyday work locally, with optional Android contacts and calendar integration.
 
-## Tech Stack
+## A look inside
 
-- Language: Kotlin.
-- UI: Jetpack Compose and Material 3.
-- Database: Room over SQLite.
-- Background work: WorkManager.
-- Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions signed release APK build.
+<table>
+  <tr><th>Clients</th><th>Appointments</th><th>Finances</th></tr>
+  <tr>
+    <td width="33%"><img src="docs/screenshots/clients.png" alt="Clients" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/appointments.png" alt="Appointments" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/finances.png" alt="Finances" width="100%"></td>
+  </tr>
+</table>
 
-## Project Structure
+Actual screenshots of version 0.4.0 on an Android emulator with fictional demo data. The app interface is currently in Russian; README translations are available above.
 
-```text
-offline-beauty-crm/   Android application module
-build-logs/           Local build logs, ignored by Git
-test-artifacts/       Local test artifacts, ignored by Git
-```
+## Made for the working day
 
-## Local Build
+| | |
+| :--- | :--- |
+| **Clients** | Keep client profiles, contact details and notes; optionally link them to Android contacts. |
+| **Appointments** | Plan in day, 3-day, week and month views. Manage services, duration and days off. |
+| **Services & finances** | Maintain prices and durations, record payments, track debts, income and expenses. |
+| **Automation** | Set up SMS workflows with a task queue and confirmation options. |
+| **Backup & updates** | Export and import JSON backups, configure automatic backups and check GitHub Releases for APK updates. |
 
-The project requires Android SDK and Gradle compatible with Android Gradle Plugin `8.11.1`.
+### Local by default
+
+Core CRM records live in a Room/SQLite database on the device. Everyday record keeping works offline. Contact and calendar integration uses Android system providers; connected accounts may sync through their own services. SMS requires device support and permission. Release checks and APK downloads use the internet.
+
+## Try the app
+
+1. Open the [latest release](https://github.com/IgorNadein/12609/releases/latest) and download the `.apk` under **Assets**.
+2. Install it on Android 8.0 or newer. If prompted, allow installation from the app used to open the APK.
+3. Add a client, create a service and book an appointment. Configure optional integrations and backups in Settings.
+
+> This repository is a portfolio snapshot. Published APKs use a legacy signing key that was previously committed; treat that key as compromised. Use a new signing key for production distribution. See [release signing](docs/DEVELOPMENT.md#release-signing).
+
+## Built with
+
+**Kotlin** · **Jetpack Compose** · **Material 3** · **Room / SQLite** · **Coroutines / Flow** · **WorkManager** · **GitHub Actions**
+
+## Explore the source
+
+The application currently keeps most UI, database and integration logic in `MainActivity.kt`. Calendar indexing and related performance helpers live in `PerformanceState.kt`.
+
+- [MainActivity.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/MainActivity.kt)
+- [PerformanceState.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/PerformanceState.kt)
+- [PerformanceStateTest.kt](offline-beauty-crm/app/src/test/java/com/offlinebeautycrm/PerformanceStateTest.kt)
+- [Android Release APK](.github/workflows/android-release.yml)
+
+## Build locally
+
+Use **JDK 17**, **Gradle 8.14.3** and **Android SDK Platform 36**. There is no Gradle wrapper in the repository.
 
 ```bash
-cd offline-beauty-crm
+git clone https://github.com/IgorNadein/12609.git
+cd 12609/offline-beauty-crm
 gradle :app:assembleDebug
 ```
 
-The repository does not include a Gradle wrapper yet, so the local build depends on an installed Gradle distribution or Android Studio.
+See the [development guide](docs/DEVELOPMENT.md) for SDK configuration, unit tests, project structure and signed releases.
 
-## Release CI
+## Feedback
 
-GitHub Actions can build and publish a signed release APK from `master`:
-
-```bash
-gradle :app:assembleRelease
-```
-
-The workflow restores the signing keystore from GitHub Actions Secrets, builds a signed release APK, creates a GitHub Release, and uploads the APK asset. The app can use the latest GitHub Release for its update-checking flow.
-
-## Release Signing
-
-Release signing is configured through environment variables and GitHub Actions Secrets only:
-
-- `SIGNING_STORE_FILE`
-- `SIGNING_STORE_PASSWORD`
-- `SIGNING_KEY_ALIAS`
-- `SIGNING_KEY_PASSWORD`
-- `KEYSTORE_BASE64`
-- `KEYSTORE_PASSWORD`
-- `KEY_ALIAS`
-- `KEY_PASSWORD`
-
-Signing keys, keystores, local APKs, generated build folders, test artifacts, and local logs are excluded from Git.
-
-## Security Notes
-
-This public version is prepared as a portfolio snapshot. The update key is stored in GitHub Actions Secrets only, so test devices signed with the previous APK key can still receive updates through GitHub Releases. Because this key was previously committed, it must still be treated as compromised and should not be reused for real production distribution.
+Found a problem or have an idea? [Open an issue](https://github.com/IgorNadein/12609/issues). Include the app version, Android version and steps to reproduce; use fictional data in examples.

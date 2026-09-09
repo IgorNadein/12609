@@ -1,75 +1,90 @@
-**Язык:** [English](README.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a>
+</p>
 
-# 12609 - Offline Service CRM
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="12609 — Offline Service CRM" width="100%">
+</p>
 
-12609 - нативное Android-приложение CRM для независимых сервисных специалистов и малого бизнеса, работающего по записи. Приложение рассчитано на offline-first работу: клиенты, записи, услуги, финансы, синхронизация с системными контактами и календарем, SMS-oriented автоматизация задач, JSON backup/import и проверка обновлений APK.
+<h1 align="center">12609 · Offline Service CRM</h1>
+<p align="center"><strong>Клиенты, записи и финансы — вместе на вашем Android-устройстве.</strong></p>
 
-Проект демонстрирует Android product development: Kotlin, Jetpack Compose, Material 3, Room/SQLite, WorkManager, системные Android-интеграции, local-first хранение данных и GitHub Actions CI.
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><img src="https://img.shields.io/github/v/release/IgorNadein/12609?style=flat-square&amp;color=c21159" alt="GitHub release"></a>
+  <a href="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml"><img src="https://github.com/IgorNadein/12609/actions/workflows/android-release.yml/badge.svg" alt="Android Release APK"></a>
+  <img src="https://img.shields.io/badge/Android-8.0%2B-3d8061?style=flat-square" alt="Android 8.0+">
+  <img src="https://img.shields.io/badge/Kotlin-2.0.21-7f52ff?style=flat-square" alt="Kotlin 2.0.21">
+</p>
 
-## Возможности
+<p align="center">
+  <a href="https://github.com/IgorNadein/12609/releases/latest"><strong>Скачать APK</strong></a> ·
+  <a href="https://github.com/IgorNadein/12609/releases">Релизы</a> ·
+  <a href="docs/DEVELOPMENT.md">Сборка и разработка</a> ·
+  <a href="https://github.com/IgorNadein/12609/issues">Сообщить о проблеме</a>
+</p>
 
-- Клиентская база с опциональной привязкой к системным контактам Android.
-- Календарь записей: день, 3 дня, неделя и месяц.
-- Режимы синхронизации с Android Contacts и Calendar.
-- Каталог услуг с ценой и длительностью.
-- Локальные финансы: оплаты, долги, доходы и расходы.
-- Очередь автоматизации и SMS-oriented workflows.
-- JSON backup и import локальных данных.
-- Проверка обновлений через GitHub Releases, которую можно настроить для signed APK distribution.
+Нативная Android CRM для частных специалистов и небольших компаний, работающих по записи. Повседневная работа хранится локально; контакты и календарь Android можно подключить по желанию.
 
-## Стек
+## Как выглядит приложение
 
-- Language: Kotlin.
-- UI: Jetpack Compose и Material 3.
-- Database: Room поверх SQLite.
-- Background work: WorkManager.
-- Android integrations: contacts, calendar, SMS, system APK installer.
-- CI: GitHub Actions signed release APK build.
+<table>
+  <tr><th>Клиенты</th><th>Записи</th><th>Финансы</th></tr>
+  <tr>
+    <td width="33%"><img src="docs/screenshots/clients.png" alt="Клиенты" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/appointments.png" alt="Записи" width="100%"></td>
+    <td width="33%"><img src="docs/screenshots/finances.png" alt="Финансы" width="100%"></td>
+  </tr>
+</table>
 
-## Структура проекта
+Реальные скриншоты версии 0.4.0 из Android-эмулятора с вымышленными данными. Интерфейс приложения сейчас на русском; переводы README доступны выше.
 
-```text
-offline-beauty-crm/   Android application module
-build-logs/           Local build logs, ignored by Git
-test-artifacts/       Local test artifacts, ignored by Git
-```
+## Для повседневной работы
+
+| | |
+| :--- | :--- |
+| **Клиенты** | Карточки клиентов, контактные данные и заметки. При необходимости — связь с контактами Android. |
+| **Записи** | Календарь на день, три дня, неделю и месяц. Услуги, длительность визитов и выходные. |
+| **Услуги и финансы** | Каталог цен и длительности услуг, оплаты, задолженности, доходы и расходы. |
+| **Автоматизация** | SMS-сценарии, очередь задач и возможность подтверждения перед выполнением. |
+| **Копии и обновления** | Экспорт и импорт JSON, настройка автоматических резервных копий и проверка обновлений APK через GitHub Releases. |
+
+### Локальное хранение по умолчанию
+
+Основные данные CRM находятся в базе Room/SQLite на устройстве. Для ведения клиентов и записей интернет не нужен. Интеграции используют системные контакты и календарь Android; подключённые аккаунты могут синхронизироваться через свои сервисы. Для SMS нужны поддержка устройства и разрешение. Проверка релизов и загрузка APK требуют интернета.
+
+## Попробовать приложение
+
+1. Откройте [последний релиз](https://github.com/IgorNadein/12609/releases/latest) и скачайте `.apk` из раздела **Assets**.
+2. Установите APK на Android 8.0 или новее. Если система запросит, разрешите установку для приложения, через которое открываете файл.
+3. Добавьте клиента, создайте услугу и запись. Дополнительные интеграции и резервные копии настраиваются в разделе «Настройки».
+
+> Репозиторий опубликован как портфолио. APK используют прежний ключ подписи, который ранее попадал в Git; его следует считать скомпрометированным. Для промышленного распространения нужен новый ключ. Подробнее — в [инструкции по подписи](docs/DEVELOPMENT.md#release-signing).
+
+## Технологии
+
+**Kotlin** · **Jetpack Compose** · **Material 3** · **Room / SQLite** · **Coroutines / Flow** · **WorkManager** · **GitHub Actions**
+
+## Устройство проекта
+
+Большая часть интерфейса, работы с базой и интеграций пока находится в `MainActivity.kt`. Индексы календаря и вспомогательная логика производительности вынесены в `PerformanceState.kt`.
+
+- [MainActivity.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/MainActivity.kt)
+- [PerformanceState.kt](offline-beauty-crm/app/src/main/java/com/offlinebeautycrm/PerformanceState.kt)
+- [PerformanceStateTest.kt](offline-beauty-crm/app/src/test/java/com/offlinebeautycrm/PerformanceStateTest.kt)
+- [Android Release APK](.github/workflows/android-release.yml)
 
 ## Локальная сборка
 
-Нужны Android SDK и Gradle, совместимый с Android Gradle Plugin `8.11.1`.
+Нужны **JDK 17**, **Gradle 8.14.3** и **Android SDK Platform 36**. Gradle wrapper в репозитории пока отсутствует.
 
 ```bash
-cd offline-beauty-crm
+git clone https://github.com/IgorNadein/12609.git
+cd 12609/offline-beauty-crm
 gradle :app:assembleDebug
 ```
 
-Gradle wrapper пока не добавлен, поэтому локальная сборка зависит от установленного Gradle или Android Studio.
+Настройка SDK, запуск модульных тестов, структура проекта и выпуск подписанного APK описаны в [руководстве разработчика](docs/DEVELOPMENT.md) (на английском).
 
-## Release CI
+## Обратная связь
 
-GitHub Actions может собирать и публиковать signed release APK из `master`:
-
-```bash
-gradle :app:assembleRelease
-```
-
-Workflow восстанавливает signing keystore из GitHub Actions Secrets, собирает signed release APK, создает GitHub Release и загружает APK asset. Приложение может использовать latest GitHub Release для update-checking flow.
-
-## Release Signing
-
-Release signing настраивается только через environment variables и GitHub Actions Secrets:
-
-- `SIGNING_STORE_FILE`
-- `SIGNING_STORE_PASSWORD`
-- `SIGNING_KEY_ALIAS`
-- `SIGNING_KEY_PASSWORD`
-- `KEYSTORE_BASE64`
-- `KEYSTORE_PASSWORD`
-- `KEY_ALIAS`
-- `KEY_PASSWORD`
-
-Signing keys, keystores, локальные APK, generated build folders, test artifacts и local logs исключены из Git.
-
-## Security Notes
-
-Публичная версия подготовлена как portfolio snapshot. Update key хранится только в GitHub Actions Secrets, поэтому тестовые устройства со старой подписью APK смогут получать обновления через GitHub Releases. Так как этот ключ раньше попадал в Git, его все равно нужно считать скомпрометированным и не использовать для реального production distribution.
+Нашли ошибку или есть идея? [Создайте issue](https://github.com/IgorNadein/12609/issues). Укажите версию приложения и Android, опишите шаги воспроизведения. Для примеров используйте вымышленные данные.

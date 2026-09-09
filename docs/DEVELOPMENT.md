@@ -64,6 +64,12 @@ The app is currently a single Android module. Most implementation lives in `Main
 
 Local databases, test artifacts, APKs, logs, signing credentials and build outputs are excluded from Git. The screenshots in this repository were captured from version 0.4.0 on an Android emulator using fictional clients, appointments and finance records. They show the actual Russian-language interface; README translations do not imply app localization.
 
+## Repository cover
+
+[`assets/social-preview.png`](assets/social-preview.png) is the 1280 × 640 repository preview image. Its editable vector source is [`assets/social-preview.svg`](assets/social-preview.svg), based on the README banner and the existing project logo.
+
+Set the PNG in **Settings → General → Social preview → Edit → Upload an image**. Committing the file alone does not update this GitHub setting. The image follows [GitHub's social preview requirements](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
+
 ## Release workflow
 
 [Android Release APK](../.github/workflows/android-release.yml) runs on changes under `offline-beauty-crm/**` or to the workflow itself on `master`, and can also be started manually. Documentation-only commits do not trigger an APK release.

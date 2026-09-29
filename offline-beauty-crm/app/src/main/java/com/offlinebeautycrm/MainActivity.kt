@@ -84,6 +84,7 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Event
@@ -2510,6 +2511,9 @@ interface AppDao {
     @Query("SELECT id FROM outbox WHERE status IN (:statuses) AND (scheduledAt = '' OR scheduledAt <= :now) ORDER BY scheduledAt, id")
     suspend fun dueOutboxIdsByStatus(statuses: List<String>, now: String): List<Long>
 
+    @Query("SELECT id FROM outbox WHERE clientId = :clientId OR appointmentId IN (SELECT id FROM appointments WHERE clientId = :clientId)")
+    suspend fun outboxIdsForClient(clientId: Long): List<Long>
+
     @Query("SELECT dedupeKey FROM outbox WHERE appointmentId = :appointmentId AND dedupeKey != ''")
     suspend fun outboxDedupeKeysForAppointment(appointmentId: Long): List<String>
 
@@ -2618,6 +2622,9 @@ interface AppDao {
     @Query("DELETE FROM finance_transactions WHERE id = :id")
     suspend fun deleteFinanceTransactionById(id: Long)
 
+    @Query("DELETE FROM finance_transactions WHERE clientId = :clientId OR appointmentId IN (SELECT id FROM appointments WHERE clientId = :clientId)")
+    suspend fun deleteFinanceTransactionsForClient(clientId: Long)
+
     @Query("UPDATE outbox SET status = :status, error = :error, sentAt = :sentAt WHERE id = :id")
     suspend fun updateOutboxStatus(id: Long, status: String, error: String = "", sentAt: String = "")
 
@@ -2639,8 +2646,20 @@ interface AppDao {
     @Query("DELETE FROM appointment_services WHERE appointmentId = :appointmentId")
     suspend fun clearAppointmentServicesFor(appointmentId: Long)
 
+    @Query("DELETE FROM appointment_services WHERE appointmentId IN (SELECT id FROM appointments WHERE clientId = :clientId)")
+    suspend fun clearAppointmentServicesForClient(clientId: Long)
+
     @Query("DELETE FROM appointments WHERE id = :appointmentId")
     suspend fun deleteAppointmentById(appointmentId: Long)
+
+    @Query("DELETE FROM outbox WHERE clientId = :clientId OR appointmentId IN (SELECT id FROM appointments WHERE clientId = :clientId)")
+    suspend fun clearOutboxForClient(clientId: Long)
+
+    @Query("DELETE FROM appointments WHERE clientId = :clientId")
+    suspend fun deleteAppointmentsForClient(clientId: Long)
+
+    @Query("DELETE FROM clients WHERE id = :clientId")
+    suspend fun deleteClientById(clientId: Long)
 
     @Query("DELETE FROM services")
     suspend fun clearServices()
@@ -3934,6 +3953,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 autoSynced -> "Клиент обновлен и синхронизирован с контактами"
                 shouldAutoSync && !hasPermissions -> "Клиент обновлен локально. Разрешения для контактов включаются в настройках"
                 else -> "Клиент обновлен"
+            }
+        }
+    }
+
+    fun deleteClient(context: Context, clientId: Long, onResult: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            if (dao.clientById(clientId) == null) {
+                message = "Клиент не найден"
+                onResult(false)
+                return@launch
+            }
+            try {
+                val linkedAppointments = dao.appointmentsOnce().filter { it.clientId == clientId }
+                val linkedCalendarAppointments = linkedAppointments.filter { it.calendarEventId > 0 }
+                val linkedOutboxIds = dao.outboxIdsForClient(clientId)
+                db.withTransaction {
+                    dao.deleteFinanceTransactionsForClient(clientId)
+                    dao.clearOutboxForClient(clientId)
+                    dao.clearAppointmentServicesForClient(clientId)
+                    dao.deleteAppointmentsForClient(clientId)
+                    dao.deleteClientById(clientId)
+                }
+                linkedOutboxIds.forEach { outboxId ->
+                    runCatching { AutomationNotifications.cancel(context.applicationContext, outboxId) }
+                }
+                val deletedCalendarEvents = withContext(Dispatchers.IO) {
+                    linkedCalendarAppointments.count { appointment ->
+                        CalendarSync.deleteAppointmentEvent(context.applicationContext, appointment)
+                    }
+                }
+                refreshCounts()
+                message = if (deletedCalendarEvents < linkedCalendarAppointments.size) {
+                    "Клиент удален. Некоторые события календаря не удалось удалить"
+                } else {
+                    "Клиент удален"
+                }
+                onResult(true)
+            } catch (error: Exception) {
+                message = "Не удалось удалить клиента: ${error.message ?: "ошибка базы данных"}"
+                onResult(false)
             }
         }
     }
@@ -6031,6 +6090,15 @@ private fun RoundedSearchField(
         value = value,
         onValueChange = onValueChange,
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        trailingIcon = if (value.isNotBlank()) {
+            {
+                IconButton(onClick = { onValueChange("") }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Очистить поиск")
+                }
+            }
+        } else {
+            null
+        },
         placeholder = { Text(placeholder) },
         singleLine = true,
         shape = RoundedCornerShape(28.dp),
@@ -6099,13 +6167,7 @@ private fun ClientsScreen(
         derivedStateOf {
             clients
                 .asSequence()
-                .filter {
-                    query.isBlank() ||
-                        it.name.contains(query, ignoreCase = true) ||
-                        it.phone.contains(query, ignoreCase = true) ||
-                        it.email.contains(query, ignoreCase = true) ||
-                        it.company.contains(query, ignoreCase = true)
-                }
+                .filter { it.matchesClientSearch(query) }
                 .sortedBy { it.name.lowercase(Locale.getDefault()) }
                 .groupBy { clientSection(it.name) }
                 .toSortedMap()
@@ -6986,6 +7048,8 @@ private fun ClientDetailScreen(
     var pendingVideoCall by remember(client.id) { mutableStateOf(false) }
     var selectedAppointmentId by remember(client.id) { mutableStateOf<Long?>(null) }
     var movingAppointmentId by remember(client.id) { mutableStateOf<Long?>(null) }
+    var showDeleteConfirmation by remember(client.id) { mutableStateOf(false) }
+    var deleteInProgress by remember(client.id) { mutableStateOf(false) }
     val selectedAppointment = selectedAppointmentId?.let { id -> appointments.firstOrNull { it.id == id } }
     val movingAppointment = movingAppointmentId?.let { id -> appointments.firstOrNull { it.id == id } }
     val callPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -7200,6 +7264,19 @@ private fun ClientDetailScreen(
                         Text("Создать запись")
                     }
                 }
+                item {
+                    OutlinedButton(
+                        onClick = { showDeleteConfirmation = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(28.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Удалить клиента")
+                    }
+                }
             }
         }
         selectedAppointment?.let { appointment ->
@@ -7249,6 +7326,47 @@ private fun ClientDetailScreen(
                 }
             )
         }
+    }
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!deleteInProgress) showDeleteConfirmation = false
+            },
+            title = { Text("Удалить клиента?") },
+            text = {
+                Text(
+                    "Клиент «${client.name}» будет удален из приложения вместе с его записями, финансовыми операциями и задачами автоматизации. Контакт в телефоне останется."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !deleteInProgress,
+                    onClick = {
+                        deleteInProgress = true
+                        viewModel.deleteClient(context, client.id) { deleted ->
+                            deleteInProgress = false
+                            if (deleted) {
+                                showDeleteConfirmation = false
+                                onBack()
+                            }
+                        }
+                    }
+                ) {
+                    Text(
+                        if (deleteInProgress) "Удаление…" else "Удалить",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !deleteInProgress,
+                    onClick = { showDeleteConfirmation = false }
+                ) {
+                    Text("Отмена")
+                }
+            }
+        )
     }
 }
 
@@ -7561,11 +7679,7 @@ private fun ContactImportScreen(viewModel: AppViewModel, onBack: () -> Unit) {
     val contacts by remember(allContacts, query) {
         derivedStateOf {
             allContacts.filter {
-                query.isBlank() ||
-                    it.name.contains(query, true) ||
-                    it.phone.contains(query, true) ||
-                    it.email.contains(query, true) ||
-                    it.company.contains(query, true)
+                it.matchesContactSearch(query)
             }
         }
     }
@@ -9042,7 +9156,6 @@ private fun AppointmentSearchSheet(
                 .asSequence()
                 .filter { it.appointment.matchesAppointmentSearch(needle) }
                 .sortedByDescending { it.start }
-                .take(80)
                 .toList()
         }
     }
@@ -12745,11 +12858,21 @@ private fun FinanceScreen(
             val journalItems = allJournalItems
                 .filter { item -> financeJournalItemMatches(item, filter, operationSearchQuery) }
                 .sortedWith(compareByDescending<FinanceJournalItem> { parseFinanceLocalDate(it.date) ?: LocalDate.MIN }.thenByDescending { it.key })
+            val hasActiveOperationFilter =
+                filter != financeFilterOptions.first() || financeSearchQueries(operationSearchQuery).isNotEmpty()
             FinanceUiState(
-                summary = financeSummaryForRange(appointmentIndex, transactions, periodRange.first, periodRange.second),
+                summary = if (hasActiveOperationFilter) {
+                    financeSummaryForJournalItems(journalItems)
+                } else {
+                    financeSummaryForRange(appointmentIndex, transactions, periodRange.first, periodRange.second)
+                },
                 journalItems = journalItems,
                 totalJournalItemCount = allJournalItems.size,
-                appointmentCount = financeAppointmentCountForRange(appointmentIndex, periodRange.first, periodRange.second)
+                appointmentCount = if (hasActiveOperationFilter) {
+                    financeAppointmentCountForJournalItems(journalItems)
+                } else {
+                    financeAppointmentCountForRange(appointmentIndex, periodRange.first, periodRange.second)
+                }
             )
         }
     }
@@ -12839,7 +12962,7 @@ private fun FinanceScreen(
             if (journalItems.isEmpty()) {
                 item {
                     EmptyText(
-                        if (filter != financeFilterOptions.first() || operationSearchQuery.isNotBlank()) {
+                        if (filter != financeFilterOptions.first() || financeSearchQueries(operationSearchQuery).isNotEmpty()) {
                             "По выбранному фильтру операций нет."
                         } else {
                             "За этот период операций нет."
@@ -13128,7 +13251,7 @@ private fun FinanceFilterRow(
 ) {
     var showSheet by remember { mutableStateOf(false) }
     var searchExpanded by rememberSaveable { mutableStateOf(searchQuery.isNotBlank()) }
-    val hasActiveFilter = selectedFilter != financeFilterOptions.first() || searchQuery.isNotBlank()
+    val hasActiveFilter = selectedFilter != financeFilterOptions.first() || financeSearchQueries(searchQuery).isNotEmpty()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -13209,6 +13332,7 @@ private fun FinanceFilterRow(
                 singleLine = true,
                 shape = RoundedCornerShape(24.dp),
                 placeholder = { Text("Название, клиент или категория") },
+                supportingText = { Text("Несколько запросов — через запятую") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = if (searchQuery.isNotBlank()) {
                     {
@@ -13739,7 +13863,7 @@ private fun AppointmentClientRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(client?.name ?: "Выбрать клиента", style = MaterialTheme.typography.titleMedium)
             Text(
-                client?.phone?.takeIf { it.isNotBlank() } ?: "Обязательное поле",
+                client?.let(::clientSubtitle) ?: "Обязательное поле",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -13757,11 +13881,10 @@ private fun AppointmentClientPicker(
     onBack: () -> Unit,
     onSelect: (Long) -> Unit
 ) {
-    val filteredClients = clients.filter {
-        val needle = query.trim().lowercase(Locale.getDefault())
-        needle.isBlank() ||
-            it.name.lowercase(Locale.getDefault()).contains(needle) ||
-            it.phone.contains(needle)
+    val filteredClients = remember(clients, query) {
+        clients
+            .filter { it.matchesClientSearch(query) }
+            .sortedBy { it.name.lowercase(Locale.getDefault()) }
     }
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -13784,7 +13907,10 @@ private fun AppointmentClientPicker(
                 .padding(horizontal = 20.dp, vertical = 10.dp)
         )
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(filteredClients) { client ->
+            if (filteredClients.isEmpty()) {
+                item { EmptyText(if (query.isBlank()) "Пока нет клиентов." else "Ничего не найдено.") }
+            }
+            items(filteredClients, key = { it.id }) { client ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -13800,11 +13926,24 @@ private fun AppointmentClientPicker(
                     Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(client.name, style = MaterialTheme.typography.titleMedium)
-                        if (client.phone.isNotBlank()) {
-                            Text(client.phone, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                        Text(clientSubtitle(client), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
+            }
+            item {
+                Text(
+                    text = if (query.isBlank()) {
+                        "Всего клиентов: ${clients.size}"
+                    } else {
+                        "Найдено: ${filteredClients.size} из ${clients.size}"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 14.dp)
+                )
             }
         }
     }
@@ -15721,7 +15860,7 @@ private fun financeJournalForRange(
     }
 }
 
-private fun financeJournalItemMatches(
+internal fun financeJournalItemMatches(
     item: FinanceJournalItem,
     filter: String,
     searchQuery: String
@@ -15734,16 +15873,40 @@ private fun financeJournalItemMatches(
     }
     if (!matchesType) return false
 
-    val query = searchQuery.trim()
-    if (query.isEmpty()) return true
-    return buildList {
+    val queries = financeSearchQueries(searchQuery)
+    if (queries.isEmpty()) return true
+    val searchableValues = buildList {
         add(item.title)
         add(item.subtitle)
         add(item.date)
         item.transaction?.notes?.let { add(it) }
         item.appointment?.notes?.let { add(it) }
-    }.any { value -> value.contains(query, ignoreCase = true) }
+    }
+    return queries.any { query ->
+        searchableValues.any { value -> value.contains(query, ignoreCase = true) }
+    }
 }
+
+internal fun financeSearchQueries(searchQuery: String): List<String> =
+    searchQuery
+        .split(',')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+internal fun financeSummaryForJournalItems(items: List<FinanceJournalItem>): FinanceSummary {
+    val appointments = items
+        .mapNotNull { it.appointment }
+        .distinctBy { it.id }
+    return FinanceSummary(
+        accruedCents = appointments.sumOf { appointmentBillableCents(it) },
+        paidCents = items.filter { it.kind == FINANCE_TYPE_INCOME && !it.isDebt }.sumOf { it.amountCents },
+        debtCents = items.filter { it.isDebt }.sumOf { it.amountCents },
+        expenseCents = items.filter { it.kind == FINANCE_TYPE_EXPENSE }.sumOf { it.amountCents }
+    )
+}
+
+private fun financeAppointmentCountForJournalItems(items: List<FinanceJournalItem>): Int =
+    items.mapNotNull { it.appointment?.id }.distinct().size
 
 private fun LocalDate.toPickerMillis(): Long =
     atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
@@ -16202,13 +16365,108 @@ private fun calendarDisplaySubtitle(calendar: SystemCalendar): String {
     return listOf(source, account).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
-private fun AppointmentRow.matchesAppointmentSearch(query: String): Boolean {
-    val needle = query.trim().lowercase(Locale.getDefault())
-    if (needle.isBlank()) return true
-    return service.lowercase(Locale.getDefault()).contains(needle) ||
-        clientName.lowercase(Locale.getDefault()).contains(needle) ||
-        notes.lowercase(Locale.getDefault()).contains(needle) ||
-        status.lowercase(Locale.getDefault()).contains(needle)
+internal fun ClientEntity.matchesClientSearch(query: String): Boolean =
+    matchesSearchQuery(
+        query = query,
+        values = listOf(
+            name,
+            givenName,
+            middleName,
+            familyName,
+            nickname,
+            phone,
+            phoneHome,
+            phoneWork,
+            phoneOther,
+            email,
+            emailWork,
+            address,
+            addressWork,
+            company,
+            jobTitle,
+            website,
+            birthday,
+            social,
+            notes
+        ),
+        phoneValues = listOf(phone, phoneHome, phoneWork, phoneOther)
+    )
+
+private fun ContactCandidate.matchesContactSearch(query: String): Boolean =
+    matchesSearchQuery(
+        query = query,
+        values = listOf(
+            name,
+            givenName,
+            middleName,
+            familyName,
+            nickname,
+            phone,
+            phoneHome,
+            phoneWork,
+            phoneOther,
+            email,
+            emailWork,
+            address,
+            addressWork,
+            company,
+            jobTitle,
+            website,
+            birthday,
+            social,
+            notes
+        ),
+        phoneValues = listOf(phone, phoneHome, phoneWork, phoneOther)
+    )
+
+private fun AppointmentRow.matchesAppointmentSearch(query: String): Boolean =
+    matchesSearchQuery(
+        query = query,
+        values = listOf(
+            service,
+            clientName,
+            startAt,
+            price,
+            formatMoneyPlain(priceCents),
+            paymentStatusLabel(paymentStatus),
+            paymentMethod,
+            paidAt,
+            status,
+            notes
+        )
+    )
+
+private fun matchesSearchQuery(
+    query: String,
+    values: List<String>,
+    phoneValues: List<String> = emptyList()
+): Boolean {
+    val terms = query
+        .trim()
+        .split(' ', '\t', '\n', '\r')
+        .filter { it.isNotBlank() }
+    if (terms.isEmpty()) return true
+    val searchableValues = values.filter { it.isNotBlank() }
+    val normalizedPhones = phoneValues.map(::normalizePhone).filter { it.isNotBlank() }
+    if (query.none { it.isLetter() } && phoneValuesMatch(query, normalizedPhones)) return true
+    return terms.all { term ->
+        searchableValues.any { value -> value.contains(term, ignoreCase = true) } ||
+            (term.none { it.isLetter() } && phoneValuesMatch(term, normalizedPhones))
+    }
+}
+
+private fun phoneValuesMatch(query: String, normalizedPhones: List<String>): Boolean {
+    val digits = normalizePhone(query)
+    if (digits.isBlank()) return false
+    val candidates = buildList {
+        add(digits)
+        if (digits.length > 1 && (digits.first() == '7' || digits.first() == '8')) {
+            add(digits.drop(1))
+        }
+    }
+    return candidates.any { candidate ->
+        candidate.length >= 3 && normalizedPhones.any { phone -> phone.contains(candidate) }
+    }
 }
 
 private fun parseVersionParts(value: String): List<Int>? {
@@ -16390,8 +16648,8 @@ private fun clientSection(name: String): String {
 
 private fun clientSubtitle(client: ClientEntity): String {
     return listOf(
-        client.phone,
-        client.email,
+        clientPrimaryPhone(client),
+        firstFilled(client.email, client.emailWork),
         listOf(client.company, client.jobTitle).filter { it.isNotBlank() }.joinToString(", ")
     ).filter { it.isNotBlank() }.joinToString(" / ").ifBlank {
         if (client.contactId > 0) "Связан с контактом телефона" else "Локальный клиент"

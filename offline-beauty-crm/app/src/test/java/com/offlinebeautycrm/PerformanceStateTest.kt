@@ -1,7 +1,9 @@
 package com.offlinebeautycrm
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 
@@ -25,6 +27,62 @@ class PerformanceStateTest {
         assertEquals(listOf(first, second), index.byDate[LocalDate.of(2026, 6, 22)])
         assertEquals(listOf(first, second), index.byClientId[10])
         assertEquals(third, index.byId[3])
+    }
+
+    @Test
+    fun financeSearchMatchesAnyCommaSeparatedQuery() {
+        val podology = FinanceJournalItem(
+            key = "transaction-1",
+            kind = "income",
+            title = "Подология",
+            subtitle = "Услуги · Карта",
+            amountCents = 5_000,
+            date = "2026-09-29"
+        )
+
+        assertTrue(financeJournalItemMatches(podology, "Все", "подология"))
+        assertTrue(financeJournalItemMatches(podology, "Все", "наращивание, подология"))
+        assertFalse(financeJournalItemMatches(podology, "Все", "маникюр, наращивание"))
+    }
+
+    @Test
+    fun financeSearchIgnoresEmptyCommaSeparatedQueries() {
+        assertEquals(listOf("подология", "наращивание"), financeSearchQueries(" подология, , наращивание "))
+        assertEquals(emptyList<String>(), financeSearchQueries(" , "))
+    }
+
+    @Test
+    fun financeSummaryUsesOnlyProvidedJournalItems() {
+        val income = FinanceJournalItem("income", "income", "Подология", "", 5_000, "2026-09-29")
+        val expense = FinanceJournalItem("expense", "expense", "Материалы", "", 1_200, "2026-09-29")
+        val debt = FinanceJournalItem("debt", "debt", "Наращивание", "", 2_000, "2026-09-29", isDebt = true)
+
+        val summary = financeSummaryForJournalItems(listOf(income, expense, debt))
+
+        assertEquals(5_000L, summary.paidCents)
+        assertEquals(1_200L, summary.expenseCents)
+        assertEquals(2_000L, summary.debtCents)
+        assertEquals(3_800L, summary.totalCents)
+    }
+
+    @Test
+    fun clientSearchCoversAlternateFieldsAndFormattedPhones() {
+        val client = ClientEntity(
+            id = 7,
+            name = "Анна Иванова",
+            nickname = "Анюта",
+            phone = "+7 (999) 123-45-67",
+            phoneWork = "+7 495 765-43-21",
+            emailWork = "anna@studio.example",
+            company = "Студия красоты"
+        )
+
+        assertTrue(client.matchesClientSearch("Анюта"))
+        assertTrue(client.matchesClientSearch("495765"))
+        assertTrue(client.matchesClientSearch("8 999 123"))
+        assertTrue(client.matchesClientSearch("anna@studio"))
+        assertTrue(client.matchesClientSearch("Анна студия"))
+        assertFalse(client.matchesClientSearch("Мария салон"))
     }
 
     private fun appointmentRow(

@@ -12682,6 +12682,7 @@ data class FinanceJournalItem(
 private data class FinanceUiState(
     val summary: FinanceSummary = FinanceSummary(0, 0, 0, 0),
     val journalItems: List<FinanceJournalItem> = emptyList(),
+    val totalJournalItemCount: Int = 0,
     val appointmentCount: Int = 0
 )
 
@@ -12695,7 +12696,8 @@ private fun FinanceScreen(
 ) {
     var selectedPeriodDate by remember { mutableStateOf(LocalDate.now()) }
     var periodMode by remember { mutableStateOf(FinancePeriodMode.Month) }
-    var filter by remember { mutableStateOf(financeFilterOptions.first()) }
+    var filter by rememberSaveable { mutableStateOf(financeFilterOptions.first()) }
+    var operationSearchQuery by rememberSaveable { mutableStateOf("") }
     var showAddFinanceMenu by remember { mutableStateOf(false) }
     var showExpenseTransactionSheet by remember { mutableStateOf(false) }
     var showIncomeTransactionSheet by remember { mutableStateOf(false) }
@@ -12730,33 +12732,30 @@ private fun FinanceScreen(
         appointmentIndex,
         transactions,
         periodRange,
-        filter
+        filter,
+        operationSearchQuery
     ) {
         value = withContext(Dispatchers.Default) {
-            val journalItems = financeJournalForRange(
+            val allJournalItems = financeJournalForRange(
                 appointmentIndex = appointmentIndex,
                 transactions = transactions,
                 startDate = periodRange.first,
                 endDate = periodRange.second
             )
-                .filter { item ->
-                    when (filter) {
-                        "Доходы" -> item.kind == FINANCE_TYPE_INCOME
-                        "Расходы" -> item.kind == FINANCE_TYPE_EXPENSE
-                        "Долги" -> item.isDebt
-                        else -> true
-                    }
-                }
+            val journalItems = allJournalItems
+                .filter { item -> financeJournalItemMatches(item, filter, operationSearchQuery) }
                 .sortedWith(compareByDescending<FinanceJournalItem> { parseFinanceLocalDate(it.date) ?: LocalDate.MIN }.thenByDescending { it.key })
             FinanceUiState(
                 summary = financeSummaryForRange(appointmentIndex, transactions, periodRange.first, periodRange.second),
                 journalItems = journalItems,
+                totalJournalItemCount = allJournalItems.size,
                 appointmentCount = financeAppointmentCountForRange(appointmentIndex, periodRange.first, periodRange.second)
             )
         }
     }
     val summary = financeUiState.summary
     val journalItems = financeUiState.journalItems
+    val totalJournalItemCount = financeUiState.totalJournalItemCount
     val appointmentCount = financeUiState.appointmentCount
 
     fun openTransactionEditor(transaction: FinanceTransactionEntity? = null, initialType: String = FINANCE_TYPE_EXPENSE) {
@@ -12830,11 +12829,23 @@ private fun FinanceScreen(
             item {
                 FinanceFilterRow(
                     selectedFilter = filter,
-                    onFilterChange = { filter = it }
+                    searchQuery = operationSearchQuery,
+                    visibleOperationCount = journalItems.size,
+                    totalOperationCount = totalJournalItemCount,
+                    onFilterChange = { filter = it },
+                    onSearchQueryChange = { operationSearchQuery = it }
                 )
             }
             if (journalItems.isEmpty()) {
-                item { EmptyText("За этот период операций нет.") }
+                item {
+                    EmptyText(
+                        if (filter != financeFilterOptions.first() || operationSearchQuery.isNotBlank()) {
+                            "По выбранному фильтру операций нет."
+                        } else {
+                            "За этот период операций нет."
+                        }
+                    )
+                }
             } else {
                 items(journalItems, key = { it.key }) { item ->
                     FinanceJournalRow(
@@ -13109,41 +13120,114 @@ private fun FinanceScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 private fun FinanceFilterRow(
     selectedFilter: String,
-    onFilterChange: (String) -> Unit
+    searchQuery: String,
+    visibleOperationCount: Int,
+    totalOperationCount: Int,
+    onFilterChange: (String) -> Unit,
+    onSearchQueryChange: (String) -> Unit
 ) {
     var showSheet by remember { mutableStateOf(false) }
-    Row(
+    var searchExpanded by rememberSaveable { mutableStateOf(searchQuery.isNotBlank()) }
+    val hasActiveFilter = selectedFilter != financeFilterOptions.first() || searchQuery.isNotBlank()
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Surface(
-            modifier = Modifier
-                .clip(RoundedCornerShape(28.dp))
-                .clickable { showSheet = true },
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerLow
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(28.dp))
+                    .clickable { showSheet = true },
+                shape = RoundedCornerShape(28.dp),
+                color = if (selectedFilter == financeFilterOptions.first()) {
+                    MaterialTheme.colorScheme.surfaceContainerLow
+                } else {
+                    MaterialTheme.colorScheme.secondaryContainer
+                }
             ) {
-                Icon(
-                    financeFilterIcon(selectedFilter),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    financeFilterLabel(selectedFilter),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Icon(Icons.Filled.ExpandMore, contentDescription = "Выбрать фильтр")
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        financeFilterIcon(selectedFilter),
+                        contentDescription = null,
+                        tint = if (selectedFilter == financeFilterOptions.first()) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        }
+                    )
+                    Text(
+                        financeFilterLabel(selectedFilter),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        visibleOperationCount.toString(),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Icon(Icons.Filled.ExpandMore, contentDescription = "Выбрать фильтр")
+                }
             }
+            IconButton(onClick = { searchExpanded = !searchExpanded }) {
+                Icon(
+                    Icons.Filled.Search,
+                    contentDescription = if (searchExpanded) "Скрыть поиск" else "Найти операцию",
+                    tint = if (searchQuery.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (hasActiveFilter) {
+                IconButton(
+                    onClick = {
+                        onFilterChange(financeFilterOptions.first())
+                        onSearchQueryChange("")
+                        searchExpanded = false
+                    }
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Сбросить фильтр")
+                }
+            }
+        }
+        if (searchExpanded) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                placeholder = { Text("Название, клиент или категория") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = if (searchQuery.isNotBlank()) {
+                    {
+                        IconButton(onClick = { onSearchQueryChange("") }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Очистить поиск")
+                        }
+                    }
+                } else {
+                    null
+                }
+            )
+        }
+        if (hasActiveFilter) {
+            Text(
+                "Показано $visibleOperationCount из $totalOperationCount",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 14.dp)
+            )
         }
     }
     if (showSheet) {
@@ -13154,6 +13238,12 @@ private fun FinanceFilterRow(
                     .padding(start = 18.dp, end = 18.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                Text(
+                    "Какие операции показать",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
                 financeFilterOptions.forEach { option ->
                     val selected = option == selectedFilter
                     Surface(
@@ -13196,6 +13286,13 @@ private fun FinanceFilterRow(
                                 },
                                 modifier = Modifier.weight(1f)
                             )
+                            if (selected) {
+                                Icon(
+                                    Icons.Filled.Check,
+                                    contentDescription = "Выбрано",
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
                         }
                     }
                 }
@@ -15622,6 +15719,30 @@ private fun financeJournalForRange(
             )
         }
     }
+}
+
+private fun financeJournalItemMatches(
+    item: FinanceJournalItem,
+    filter: String,
+    searchQuery: String
+): Boolean {
+    val matchesType = when (filter) {
+        "Доходы" -> item.kind == FINANCE_TYPE_INCOME
+        "Расходы" -> item.kind == FINANCE_TYPE_EXPENSE
+        "Долги" -> item.isDebt
+        else -> true
+    }
+    if (!matchesType) return false
+
+    val query = searchQuery.trim()
+    if (query.isEmpty()) return true
+    return buildList {
+        add(item.title)
+        add(item.subtitle)
+        add(item.date)
+        item.transaction?.notes?.let { add(it) }
+        item.appointment?.notes?.let { add(it) }
+    }.any { value -> value.contains(query, ignoreCase = true) }
 }
 
 private fun LocalDate.toPickerMillis(): Long =

@@ -85,6 +85,24 @@ class PerformanceStateTest {
         assertFalse(client.matchesClientSearch("Мария салон"))
     }
 
+    @Test
+    fun searchTreatsYoAndYeAsEquivalent() {
+        val client = ClientEntity(name = "Алёна Фёдорова")
+        val operation = FinanceJournalItem(
+            key = "expense-yo",
+            kind = "expense",
+            title = "Расчёт с поставщиком",
+            subtitle = "",
+            amountCents = 1_000,
+            date = "2026-09-29"
+        )
+
+        assertTrue(client.matchesClientSearch("алена федорова"))
+        assertTrue(client.matchesClientSearch("алёна фёдорова"))
+        assertTrue(financeJournalItemMatches(operation, "Все", "расчет"))
+        assertEquals("ежик", normalizeSearchText("Ёжик"))
+    }
+
     private fun appointmentRow(
         id: Long,
         clientId: Long,

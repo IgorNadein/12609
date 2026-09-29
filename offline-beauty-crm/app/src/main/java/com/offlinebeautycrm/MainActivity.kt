@@ -15883,7 +15883,8 @@ internal fun financeJournalItemMatches(
         item.appointment?.notes?.let { add(it) }
     }
     return queries.any { query ->
-        searchableValues.any { value -> value.contains(query, ignoreCase = true) }
+        val normalizedQuery = normalizeSearchText(query)
+        searchableValues.any { value -> normalizeSearchText(value).contains(normalizedQuery) }
     }
 }
 
@@ -16446,14 +16447,20 @@ private fun matchesSearchQuery(
         .split(' ', '\t', '\n', '\r')
         .filter { it.isNotBlank() }
     if (terms.isEmpty()) return true
-    val searchableValues = values.filter { it.isNotBlank() }
+    val searchableValues = values
+        .filter { it.isNotBlank() }
+        .map(::normalizeSearchText)
     val normalizedPhones = phoneValues.map(::normalizePhone).filter { it.isNotBlank() }
     if (query.none { it.isLetter() } && phoneValuesMatch(query, normalizedPhones)) return true
     return terms.all { term ->
-        searchableValues.any { value -> value.contains(term, ignoreCase = true) } ||
+        val normalizedTerm = normalizeSearchText(term)
+        searchableValues.any { value -> value.contains(normalizedTerm) } ||
             (term.none { it.isLetter() } && phoneValuesMatch(term, normalizedPhones))
     }
 }
+
+internal fun normalizeSearchText(value: String): String =
+    value.lowercase(Locale.ROOT).replace('ё', 'е')
 
 private fun phoneValuesMatch(query: String, normalizedPhones: List<String>): Boolean {
     val digits = normalizePhone(query)
